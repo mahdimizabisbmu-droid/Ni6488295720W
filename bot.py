@@ -360,7 +360,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔎 جستجوی جزوه / نمونه‌سوال", callback_data="menu_search")],
         [InlineKeyboardButton("📤 ارسال جزوه / نمونه‌سوال (فقط PDF)", callback_data="menu_upload")],
         [InlineKeyboardButton("📣 پیام همگانی (بعد از ثبت جزوه)", callback_data="menu_user_bc")],
-        [InlineKeyboardButton("💬 شروع چت ناشناس", callback_data="menu_chat")],
+        [InlineKeyboardButton("💬 چت ناشناس با دانشجوی رندوم", callback_data="menu_chat")],
         [InlineKeyboardButton("📣 معرفی به دوستان", callback_data="menu_invite")],
         [InlineKeyboardButton("👤 پروفایل من", callback_data="menu_profile")],
     ])
