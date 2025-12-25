@@ -7,7 +7,6 @@ from telegram import Update
 from telegram.ext import Application
 
 # ========= CONFIG =========
-# اگر env ندادی، از همین استفاده می‌کنیم (مهم!)
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL") or "https://ni6488295720w.onrender.com"
 WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH") or "/tg-webhook"
 WEBHOOK_URL = PUBLIC_BASE_URL.rstrip("/") + WEBHOOK_PATH
@@ -40,7 +39,6 @@ def telegram_webhook():
 
 def start_bot_background():
     global bot_app, bot_loop
-
     try:
         bot_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(bot_loop)
@@ -52,12 +50,18 @@ def start_bot_background():
             await bot_app.initialize()
             await bot_app.start()
 
-            # webhook reset + set
+            # ✅ پاک کردن وبهوک قبلی + ست کردن وبهوک جدید با همه آپدیت‌ها
             await bot_app.bot.delete_webhook(drop_pending_updates=True)
-            ok = await bot_app.bot.set_webhook(url=WEBHOOK_URL)
+            ok = await bot_app.bot.set_webhook(
+                url=WEBHOOK_URL,
+                allowed_updates=Update.ALL_TYPES,   # ✅ خیلی مهم برای دکمه‌ها
+                drop_pending_updates=True
+            )
 
+            wh = await bot_app.bot.get_webhook_info()
             print("✅ Webhook URL:", WEBHOOK_URL)
             print("✅ setWebhook result:", ok)
+            print("✅ Telegram webhook info:", wh.url, "allowed_updates=", wh.allowed_updates)
 
         bot_loop.run_until_complete(boot())
         bot_loop.run_forever()
