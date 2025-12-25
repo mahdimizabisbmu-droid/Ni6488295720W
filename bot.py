@@ -246,7 +246,6 @@ active_session: Dict[int, int] = {}
 admin_broadcast_mode: Dict[int, bool] = {}
 admin_class_filter: Dict[int, Dict[str, str]] = {}
 admin_delete_mode: Dict[int, bool] = {}
-
 browse_context: Dict[int, Dict[str, int]] = {}
 
 
@@ -332,6 +331,12 @@ def user_configured(uid: int) -> bool:
     return bool(row and row.get("faculty") and row.get("major") and row.get("entry_year"))
 
 
+def format_user_row(row: Optional[dict]) -> str:
+    if not row:
+        return "نامشخص"
+    return f"{row.get('full_name') or 'بدون‌نام'} | @{row.get('username') or '-'} | {row['user_id']}"
+
+
 # =========================
 # Keyboards
 # =========================
@@ -352,9 +357,11 @@ def main_menu() -> InlineKeyboardMarkup:
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🗂 جزوه‌های در انتظار تایید", callback_data="admin_pending")],
+        [InlineKeyboardButton("🔎 جستجوی جزوه", callback_data="admin_search_mat")],
         [InlineKeyboardButton("📊 آمار کاربران", callback_data="admin_stats")],
         [InlineKeyboardButton("👥 ۱۵ کاربر جدید", callback_data="admin_latest")],
         [InlineKeyboardButton("🏫 لیست دانشجوها بر اساس کلاس", callback_data="admin_classlist")],
+        [InlineKeyboardButton("💬 ۱۰ چت ناشناس اخیر", callback_data="admin_chats")],
         [InlineKeyboardButton("📢 پیام همگانی", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🗑 حذف جزوه", callback_data="admin_delete")],
     ])
@@ -406,7 +413,7 @@ async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_i
         chat_id=admin_chat_id,
         text=(
             "🗂 جزوه در انتظار تایید\n\n"
-            f"👤 {(user.get('full_name') if user else 'بدون‌نام')} | @{(user.get('username') if user else '-') or '-'} | {row['submitter_id']}\n"
+            f"👤 {format_user_row(user)}\n"
             f"🎓 {row['faculty']} / {row['major']} / {row['entry_year']}\n"
             f"📚 درس: {row['course_name']}\n"
             f"👨‍🏫 استاد: {prof}\n"
@@ -424,7 +431,7 @@ async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int,
         await context.bot.send_message(chat_id=admin_chat_id, text="این مورد قبلاً بررسی شده یا وجود ندارد.")
         return
 
-    submitter = _fetchone("SELECT username, full_name FROM users WHERE user_id=%s", (row["submitter_id"],))
+    submitter = _fetchone("SELECT username, full_name, user_id FROM users WHERE user_id=%s", (row["submitter_id"],))
 
     caption_lines = [
         f"📚 درس: {row['course_name']}",
@@ -434,7 +441,7 @@ async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int,
     ]
     if submitter:
         caption_lines.append(
-            f"👤 ارسال‌کننده: {(submitter.get('full_name') or 'بدون‌نام')} | @{(submitter.get('username') or '-')}"
+            f"👤 ارسال‌کننده: {(submitter.get('full_name') or 'بدون‌نام')} | @{(submitter.get('username') or '-')} | {submitter['user_id']}"
         )
     caption = "\n".join(caption_lines)
 
@@ -947,12 +954,61 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # --- admin class list filter ---
         if data == "admin_classlist" and is_admin(uid):
             admin_class_filter[uid] = {}
             await cq.message.reply_text("🏫 دانشکده مورد نظر رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
             return
 
+        if data == "admin_search_mat" and is_admin(uid):
+            search_state[uid] = True
+            await cq.message.reply_text(
+                "🔎 اسم درس رو بنویس تا روی کل جزوه‌های دانشگاه جست‌وجو بشه.\n"
+                "برای هر نتیجه، آیدی عددی جزوه هم نمایش داده می‌شه.",
+                reply_markup=search_kb()
+            )
+            return
+
+        if data == "admin_chats" and is_admin(uid):
+            sessions = _fetchall(
+                "SELECT session_id, user_a, user_b, started_at, ended_at, status "
+                "FROM chat_sessions ORDER BY started_at DESC LIMIT 10"
+            )
+            if not sessions:
+                await cq.message.reply_text("هنوز هیچ چت ناشناسی ثبت نشده 🌱", reply_markup=back_menu_kb())
+                return
+
+            for s in sessions:
+                ua = _fetchone("SELECT user_id, username, full_name FROM users WHERE user_id=%s", (s["user_a"],))
+                ub = _fetchone("SELECT user_id, username, full_name FROM users WHERE user_id=%s", (s["user_b"],))
+                msgs = _fetchall(
+                    "SELECT sender_id, msg_text, ts FROM chat_messages WHERE session_id=%s ORDER BY ts ASC LIMIT 40",
+                    (s["session_id"],)
+                )
+
+                header = (
+                    f"🧵 چت ناشناس #{s['session_id']}\n"
+                    f"👤 نفر اول: {format_user_row(ua)}\n"
+                    f"👤 نفر دوم: {format_user_row(ub)}\n"
+                    f"📅 شروع: {s['started_at']}\n"
+                    f"📅 پایان: {s.get('ended_at') or '-'}\n"
+                    f"🔖 وضعیت: {s['status']}\n\n"
+                )
+
+                body_lines = []
+                for m in msgs:
+                    sender = "نفر اول" if ua and m["sender_id"] == ua["user_id"] else "نفر دوم"
+                    body_lines.append(f"{sender}: {m['msg_text']}")
+
+                text = header + ("\n".join(body_lines) if body_lines else "⏳ هنوز پیامی ثبت نشده.")
+                if len(text) > 3900:
+                    text = text[:3900] + "\n\n… (باقی پیام‌ها طولانی شد و نمایش داده نشد)"
+
+                await cq.message.reply_text(text)
+
+            await cq.message.reply_text("پایان لیست ۱۰ چت اخیر 👆", reply_markup=back_menu_kb())
+            return
+
+        # --- admin class list filter ---
         if data.startswith("cls_fac|") and is_admin(uid):
             idx = int(data.split("|", 1)[1])
             if idx < 0 or idx >= len(FACULTIES):
@@ -1101,7 +1157,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=partner, text="(فعلاً تو چت ناشناس فقط متن پشتیبانی می‌شه 🙂)")
             return
 
-        # --- search by name ---
+        # --- search by name (user or admin) ---
         if search_state.get(uid):
             if not msg.text:
                 return
