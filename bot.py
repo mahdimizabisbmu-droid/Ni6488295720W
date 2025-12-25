@@ -1,14 +1,11 @@
 import os
-import asyncio
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import psycopg
 from psycopg.rows import dict_row
 
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
@@ -23,12 +20,9 @@ ADMIN_IDS = {6474515118}
 ARCHIVE_CHANNEL_ID = -1003387982513
 BOT_PUBLIC_LINK = "@SBMUchatBot"
 
-# advisory lock key (any constant int64 is fine)
-GLOBAL_BOT_LOCK_ID = 941234567890
-
 
 # =========================
-# Read secrets from env OR files (robust)
+# Read secrets from env OR files
 # =========================
 def read_first_existing(paths):
     for p in paths:
@@ -67,10 +61,7 @@ if not DATABASE_URL:
 def db_connect():
     return psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
-
 db = db_connect()
-_lock_conn = None  # holds advisory lock
-
 
 def q(sql: str, params: tuple = ()):
     global db
@@ -79,20 +70,10 @@ def q(sql: str, params: tuple = ()):
             cur.execute(sql, params)
             return cur
     except psycopg.OperationalError:
-        # reconnect
         db = db_connect()
         with db.cursor() as cur:
             cur.execute(sql, params)
             return cur
-
-
-def acquire_global_lock():
-    """Block until Postgres advisory lock acquired. Prevents multi-polling across instances."""
-    global _lock_conn
-    _lock_conn = psycopg.connect(DATABASE_URL, autocommit=True)
-    with _lock_conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_lock(%s)", (GLOBAL_BOT_LOCK_ID,))
-    print("✅ Acquired global advisory lock. Only one polling instance will run.")
 
 
 def init_db():
@@ -108,7 +89,6 @@ def init_db():
         last_seen TIMESTAMPTZ DEFAULT NOW()
     )
     """)
-
     q("""
     CREATE TABLE IF NOT EXISTS pending_uploads (
         upload_id BIGSERIAL PRIMARY KEY,
@@ -120,11 +100,10 @@ def init_db():
         professor_name TEXT,
         user_chat_id BIGINT NOT NULL,
         user_message_id BIGINT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
+        status TEXT NOT NULL DEFAULT 'pending',
         created_at TIMESTAMPTZ DEFAULT NOW()
     )
     """)
-
     q("""
     CREATE TABLE IF NOT EXISTS materials (
         material_id BIGSERIAL PRIMARY KEY,
@@ -139,9 +118,7 @@ def init_db():
         created_at TIMESTAMPTZ DEFAULT NOW()
     )
     """)
-
     q("CREATE INDEX IF NOT EXISTS idx_materials_search ON materials (faculty, major, course_name)")
-
     q("""
     CREATE TABLE IF NOT EXISTS user_stats (
         user_id BIGINT PRIMARY KEY,
@@ -149,7 +126,6 @@ def init_db():
         chat_used BOOLEAN NOT NULL DEFAULT FALSE
     )
     """)
-
     q("""
     CREATE TABLE IF NOT EXISTS chat_sessions (
         session_id BIGSERIAL PRIMARY KEY,
@@ -160,7 +136,6 @@ def init_db():
         status TEXT NOT NULL DEFAULT 'active'
     )
     """)
-
     q("""
     CREATE TABLE IF NOT EXISTS chat_messages (
         id BIGSERIAL PRIMARY KEY,
@@ -170,7 +145,6 @@ def init_db():
         ts TIMESTAMPTZ DEFAULT NOW()
     )
     """)
-
 
 init_db()
 
@@ -208,21 +182,21 @@ ENTRY_YEARS = [str(y) for y in range(1398, 1411)]
 
 
 # =========================
-# In-memory states
+# States (in-memory)
 # =========================
 user_state: Dict[int, str] = {}
 tmp: Dict[int, dict] = {}
 search_state: Dict[int, bool] = {}
 
 waiting_queue: List[int] = []
-active_chat: Dict[int, int] = {}         # uid -> partner
-active_session: Dict[int, int] = {}      # uid -> session_id
+active_chat: Dict[int, int] = {}
+active_session: Dict[int, int] = {}
 
-admin_filter_state: Dict[int, Dict[str, str]] = {}  # for class list wizard
+admin_filter_state: Dict[int, Dict[str, str]] = {}
 
 
 # =========================
-# Texts
+# Texts (friendly)
 # =========================
 WELCOME_TEXT = (
     "سلام 👋🌱\n"
@@ -270,20 +244,16 @@ INVITE_TEXT = (
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
-
 def ensure_stats(uid: int):
     q("INSERT INTO user_stats (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (uid,))
-
 
 def approved_count(uid: int) -> int:
     ensure_stats(uid)
     row = q("SELECT approved_uploads FROM user_stats WHERE user_id=%s", (uid,)).fetchone()
     return int(row["approved_uploads"]) if row else 0
 
-
 def badge(uid: int) -> str:
     return " 🏅جزوه‌یار" if approved_count(uid) >= 1 else ""
-
 
 def save_user_basic(update: Update):
     u = update.effective_user
@@ -297,7 +267,6 @@ def save_user_basic(update: Update):
     """, (u.id, u.username, (u.full_name or "").strip()))
     ensure_stats(u.id)
 
-
 def user_configured(uid: int) -> bool:
     row = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone()
     return bool(row and row["faculty"] and row["major"] and row["entry_year"])
@@ -309,7 +278,6 @@ def user_configured(uid: int) -> bool:
 def start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("➡️ شروع", callback_data="onboard")]])
 
-
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 جستجوی جزوه", callback_data="menu_search")],
@@ -318,7 +286,6 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📣 معرفی به دوستان", callback_data="menu_invite")],
         [InlineKeyboardButton("👤 پروفایل من", callback_data="menu_profile")],
     ])
-
 
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -329,16 +296,13 @@ def admin_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👤 رفتن به منوی کاربر", callback_data="go_user_menu")],
     ])
 
-
 def back_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")]])
-
 
 def faculty_kb(prefix: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(f, callback_data=f"{prefix}fac|{f}")] for f in FACULTIES]
     rows.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")])
     return InlineKeyboardMarkup(rows)
-
 
 def major_kb(prefix: str, faculty: str) -> InlineKeyboardMarkup:
     majors = MAJORS_BY_FACULTY.get(faculty, [])
@@ -346,12 +310,10 @@ def major_kb(prefix: str, faculty: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("🔙 برگشت", callback_data=f"{prefix}back_fac")])
     return InlineKeyboardMarkup(rows)
 
-
 def year_kb(prefix: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(y, callback_data=f"{prefix}year|{y}")] for y in ENTRY_YEARS]
     rows.append([InlineKeyboardButton("🔙 برگشت", callback_data=f"{prefix}back_maj")])
     return InlineKeyboardMarkup(rows)
-
 
 def search_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -361,13 +323,12 @@ def search_kb() -> InlineKeyboardMarkup:
 
 
 # =========================
-# Admin helper: send pending upload card
+# Admin: pending card
 # =========================
 async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, row: dict):
     user = q("SELECT user_id, username, full_name FROM users WHERE user_id=%s", (row["submitter_id"],)).fetchone()
     prof = row["professor_name"] or "-"
 
-    # copy PDF to admin
     await context.bot.copy_message(
         chat_id=admin_chat_id,
         from_chat_id=row["user_chat_id"],
@@ -390,9 +351,6 @@ async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_i
     )
 
 
-# =========================
-# Approve / Reject
-# =========================
 async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, upload_id: int):
     row = q("SELECT * FROM pending_uploads WHERE upload_id=%s AND status='pending'", (upload_id,)).fetchone()
     if not row:
@@ -421,11 +379,7 @@ async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int,
 
     await context.bot.send_message(chat_id=admin_chat_id, text="✅ تایید شد و به آرشیو رفت.")
     try:
-        await context.bot.send_message(
-            chat_id=row["submitter_id"],
-            text="🎉 جزوه‌ت تایید شد! مرسی که کمک می‌کنی 💙",
-            reply_markup=main_menu()
-        )
+        await context.bot.send_message(chat_id=row["submitter_id"], text="🎉 جزوه‌ت تایید شد! مرسی 💙", reply_markup=main_menu())
     except Exception:
         pass
 
@@ -435,15 +389,10 @@ async def reject_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, 
     if not row:
         await context.bot.send_message(chat_id=admin_chat_id, text="این مورد قبلاً بررسی شده یا وجود ندارد.")
         return
-
     q("UPDATE pending_uploads SET status='rejected' WHERE upload_id=%s", (upload_id,))
     await context.bot.send_message(chat_id=admin_chat_id, text="❌ رد شد.")
     try:
-        await context.bot.send_message(
-            chat_id=row["submitter_id"],
-            text="جزوه‌ت فعلاً تایید نشد 🌱 اگه دوست داشتی دوباره یک نسخه بهتر بفرست 💙",
-            reply_markup=main_menu()
-        )
+        await context.bot.send_message(chat_id=row["submitter_id"], text="جزوه‌ت فعلاً تایید نشد 🌱", reply_markup=main_menu())
     except Exception:
         pass
 
@@ -471,7 +420,7 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
     try:
         await context.bot.send_message(
             chat_id=ended_by,
-            text="👋 چت رو تموم کردی.\nاگه دوست داشتی دوباره می‌تونی چت جدید شروع کنی 😄",
+            text="👋 چت رو تموم کردی.\nاگه دوست داشتی دوباره چت جدید شروع کن 😄",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💬 چت ناشناس جدید", callback_data="menu_chat")],
                 [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")]
@@ -483,7 +432,7 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
     try:
         await context.bot.send_message(
             chat_id=partner,
-            text="⚠️ طرف مقابل از چت خارج شد.\nاگه دوست داشتی دوباره می‌تونی چت جدید شروع کنی 🙂",
+            text="⚠️ طرف مقابل از چت خارج شد.\nاگه دوست داشتی دوباره چت جدید شروع کن 🙂",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💬 چت ناشناس جدید", callback_data="menu_chat")],
                 [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")]
@@ -499,11 +448,9 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_basic(update)
     uid = update.effective_user.id
-
     if is_admin(uid):
         await update.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
         return
-
     await update.message.reply_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=start_kb())
 
 
@@ -521,15 +468,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_basic(update)
     data = cq.data
 
-    # ----- go to user menu from admin -----
-    if data == "go_user_menu":
-        if not user_configured(uid):
-            await cq.message.reply_text("برای شروع، اول دانشکده/رشته/ورودی رو انتخاب کن 👇", reply_markup=start_kb())
-        else:
-            await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
-        return
-
-    # ----- back menu -----
     if data == "back_menu":
         if is_admin(uid):
             await cq.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
@@ -540,48 +478,52 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
         return
 
-    # ----- Invite -----
+    if data == "go_user_menu":
+        if not user_configured(uid):
+            await cq.message.reply_text("برای شروع، اول دانشکده/رشته/ورودی رو انتخاب کن 👇", reply_markup=start_kb())
+        else:
+            await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
+        return
+
     if data == "menu_invite":
         await cq.message.reply_text(INVITE_TEXT, reply_markup=back_menu_kb())
         return
 
-    # ----- Onboarding -----
     if data == "onboard":
-        await cq.message.reply_text("🎓\nاول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
+        await cq.message.reply_text("🎓 اول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
         return
 
     if data.startswith("usr_fac|"):
         faculty = data.split("|", 1)[1]
         q("UPDATE users SET faculty=%s WHERE user_id=%s", (faculty, uid))
-        await cq.message.reply_text("📌\nحالا رشته‌ت رو انتخاب کن:", reply_markup=major_kb("usr_", faculty))
+        await cq.message.reply_text("📌 حالا رشته‌ت رو انتخاب کن:", reply_markup=major_kb("usr_", faculty))
         return
 
     if data == "usr_back_fac":
-        await cq.message.reply_text("🎓\nاول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
+        await cq.message.reply_text("🎓 اول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
         return
 
     if data.startswith("usr_maj|"):
         major = data.split("|", 1)[1]
         q("UPDATE users SET major=%s WHERE user_id=%s", (major, uid))
-        await cq.message.reply_text("🗓\nورودی‌ت رو انتخاب کن:", reply_markup=year_kb("usr_"))
+        await cq.message.reply_text("🗓 ورودی‌ت رو انتخاب کن:", reply_markup=year_kb("usr_"))
         return
 
     if data == "usr_back_maj":
         row = q("SELECT faculty FROM users WHERE user_id=%s", (uid,)).fetchone()
         faculty = row["faculty"] if row and row["faculty"] else None
         if not faculty:
-            await cq.message.reply_text("🎓\nاول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
+            await cq.message.reply_text("🎓 اول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
             return
-        await cq.message.reply_text("📌\nحالا رشته‌ت رو انتخاب کن:", reply_markup=major_kb("usr_", faculty))
+        await cq.message.reply_text("📌 حالا رشته‌ت رو انتخاب کن:", reply_markup=major_kb("usr_", faculty))
         return
 
     if data.startswith("usr_year|"):
         year = data.split("|", 1)[1]
         q("UPDATE users SET entry_year=%s WHERE user_id=%s", (year, uid))
-        await cq.message.reply_text("✅\nهمه‌چی آماده‌ست! خوش اومدی 💙\n\nاز اینجا شروع کن 👇", reply_markup=main_menu())
+        await cq.message.reply_text("✅ آماده‌ای! خوش اومدی 💙\n\nاز اینجا شروع کن 👇", reply_markup=main_menu())
         return
 
-    # ----- User menu -----
     if data == "menu_profile":
         r = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone() or {}
         ap = approved_count(uid)
@@ -607,14 +549,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("📤 یه فایل **PDF** از جزوه رو همینجا بفرست 💙", parse_mode="Markdown", reply_markup=back_menu_kb())
         return
 
-    # ----- Anonymous chat -----
+    # ---------- Chat ----------
     if data == "menu_chat":
         if not user_configured(uid):
             await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
             return
 
         q("UPDATE user_stats SET chat_used=TRUE WHERE user_id=%s", (uid,))
-
         if uid in active_chat:
             await cq.message.reply_text("الان توی یه چتی 🙂", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")],
@@ -659,26 +600,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        sid = q(
-            "INSERT INTO chat_sessions (user_a, user_b) VALUES (%s,%s) RETURNING session_id",
-            (uid, partner)
-        ).fetchone()["session_id"]
-
+        sid = q("INSERT INTO chat_sessions (user_a, user_b) VALUES (%s,%s) RETURNING session_id", (uid, partner)).fetchone()["session_id"]
         active_chat[uid] = partner
         active_chat[partner] = uid
         active_session[uid] = sid
         active_session[partner] = sid
 
-        await context.bot.send_message(
-            chat_id=uid,
-            text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(partner)}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]])
-        )
-        await context.bot.send_message(
-            chat_id=partner,
-            text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(uid)}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]])
-        )
+        await context.bot.send_message(chat_id=uid, text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(partner)}",
+                                       reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]]))
+        await context.bot.send_message(chat_id=partner, text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(uid)}",
+                                       reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]]))
         return
 
     if data == "chat_cancel":
@@ -691,7 +622,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await end_chat(context, uid, ended_by=uid)
         return
 
-    # ----- Admin panel -----
+    # ---------- Admin ----------
     if data == "admin_pending" and is_admin(uid):
         row = q("SELECT * FROM pending_uploads WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
         if not row:
@@ -771,7 +702,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         st = admin_filter_state.get(uid, {})
         faculty = st.get("faculty")
         major = st.get("major")
-
         rows = q("""
             SELECT user_id, username, full_name
             FROM users
@@ -779,7 +709,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ORDER BY created_at DESC
             LIMIT 200
         """, (faculty, major, year)).fetchall() or []
-
         header = f"👥 لیست دانشجوها\n\n🎓 {faculty}\n📌 {major}\n🗓 {year}\n\n"
         if not rows:
             await cq.message.reply_text(header + "فعلاً کسی تو این کلاس ثبت نشده 🙂", reply_markup=back_menu_kb())
@@ -791,18 +720,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
         return
 
-    # ----- Get material -----
+    # ---------- Get material ----------
     if data.startswith("get|"):
         mid = int(data.split("|")[1])
         mat = q("SELECT * FROM materials WHERE material_id=%s", (mid,)).fetchone()
         if not mat:
             await cq.message.reply_text("این فایل موجود نیست یا حذف شده.", reply_markup=back_menu_kb())
             return
-        await context.bot.copy_message(
-            chat_id=uid,
-            from_chat_id=mat["archive_channel_id"],
-            message_id=mat["archive_message_id"]
-        )
+        await context.bot.copy_message(chat_id=uid, from_chat_id=mat["archive_channel_id"], message_id=mat["archive_message_id"])
         await cq.message.reply_text("اگه خواستی بازم سرچ کن یا جزوه بفرست 👇", reply_markup=search_kb())
         return
 
@@ -818,7 +743,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     msg = update.message
 
-    # relay chat messages
+    # relay chat
     if uid in active_chat:
         partner = active_chat[uid]
         sid = active_session.get(uid)
@@ -912,7 +837,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await msg.reply_text("📩 جزوه‌ت رسید! بعد از تایید ادمین اضافه می‌شه 💙", reply_markup=main_menu())
 
-        # notify admin(s)
         for aid in ADMIN_IDS:
             try:
                 row = q("SELECT * FROM pending_uploads WHERE upload_id=%s", (upload_id,)).fetchone()
@@ -929,27 +853,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # ignore transient network errors
     if isinstance(context.error, NetworkError):
         return
 
 
 # =========================
-# Run (IMPORTANT FIXES)
+# Build application for webhook mode
 # =========================
-async def _post_init(app):
-    # ensure webhook is disabled for polling
-    await app.bot.delete_webhook(drop_pending_updates=True)
-
-
-def run_bot():
-    # ✅ ONLY ONE polling instance across all Render instances
-    acquire_global_lock()
-
+def build_application():
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .post_init(_post_init)
         .build()
     )
 
@@ -959,8 +873,4 @@ def run_bot():
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_message))
     app.add_error_handler(on_error)
 
-    app.run_polling(
-        stop_signals=None,
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-    )
+    return app
