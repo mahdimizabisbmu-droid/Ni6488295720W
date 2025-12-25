@@ -330,7 +330,7 @@ def user_configured(uid: int) -> bool:
 
 
 # =========================
-# Keyboards
+# Keyboards (با callback کوتاه)
 # =========================
 def start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("➡️ شروع", callback_data="onboard")]])
@@ -361,14 +361,26 @@ def back_menu_kb() -> InlineKeyboardMarkup:
 
 
 def faculty_kb(prefix: str) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(f, callback_data=f"{prefix}fac|{f}")] for f in FACULTIES]
+    """
+    به جای اسم دانشکده، ایندکس می‌فرستیم:
+    usr_fac|0 , cls_fac|1 , ...
+    """
+    rows = []
+    for idx, f in enumerate(FACULTIES):
+        rows.append([InlineKeyboardButton(f, callback_data=f"{prefix}fac|{idx}")])
     rows.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")])
     return InlineKeyboardMarkup(rows)
 
 
 def major_kb(prefix: str, faculty: str) -> InlineKeyboardMarkup:
+    """
+    اینجا هم ایندکس رشته را می‌فرستیم:
+    usr_maj|0 , cls_maj|1 , ...
+    """
     majors = MAJORS_BY_FACULTY.get(faculty, [])
-    rows = [[InlineKeyboardButton(m, callback_data=f"{prefix}maj|{m}")] for m in majors]
+    rows = []
+    for idx, m in enumerate(majors):
+        rows.append([InlineKeyboardButton(m, callback_data=f"{prefix}maj|{idx}")])
     rows.append([InlineKeyboardButton("🔙 برگشت", callback_data=f"{prefix}back_fac")])
     return InlineKeyboardMarkup(rows)
 
@@ -552,7 +564,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if data.startswith("usr_fac|"):
-            faculty = data.split("|", 1)[1]
+            idx = int(data.split("|", 1)[1])
+            if idx < 0 or idx >= len(FACULTIES):
+                await cq.message.reply_text("یه مشکلی تو انتخاب دانشکده پیش اومد، دوباره تلاش کن.", reply_markup=start_kb())
+                return
+            faculty = FACULTIES[idx]
             _run("UPDATE users SET faculty=%s WHERE user_id=%s", (faculty, uid))
             await cq.message.reply_text("📌 حالا رشته‌ت رو انتخاب کن:", reply_markup=major_kb("usr_", faculty))
             return
@@ -562,7 +578,17 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if data.startswith("usr_maj|"):
-            major = data.split("|", 1)[1]
+            idx = int(data.split("|", 1)[1])
+            row = _fetchone("SELECT faculty FROM users WHERE user_id=%s", (uid,))
+            faculty = row["faculty"] if row and row.get("faculty") else None
+            if not faculty:
+                await cq.message.reply_text("اول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
+                return
+            majors = MAJORS_BY_FACULTY.get(faculty, [])
+            if idx < 0 or idx >= len(majors):
+                await cq.message.reply_text("یه مشکلی تو انتخاب رشته پیش اومد، دوباره انتخاب کن.", reply_markup=major_kb("usr_", faculty))
+                return
+            major = majors[idx]
             _run("UPDATE users SET major=%s WHERE user_id=%s", (major, uid))
             await cq.message.reply_text("🗓 ورودی‌ت رو انتخاب کن:", reply_markup=year_kb("usr_"))
             return
@@ -578,6 +604,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("usr_year|"):
             year = data.split("|", 1)[1]
+            if year not in ENTRY_YEARS:
+                await cq.message.reply_text("سال ورودی نامعتبره، دوباره انتخاب کن 🙂", reply_markup=year_kb("usr_"))
+                return
             _run("UPDATE users SET entry_year=%s WHERE user_id=%s", (year, uid))
             await cq.message.reply_text("✅ آماده‌ای! خوش اومدی 💙\n\nاز اینجا شروع کن 👇", reply_markup=main_menu())
             return
@@ -741,7 +770,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if data.startswith("cls_fac|") and is_admin(uid):
-            faculty = data.split("|", 1)[1]
+            idx = int(data.split("|", 1)[1])
+            if idx < 0 or idx >= len(FACULTIES):
+                await cq.message.reply_text("انتخاب دانشکده نامعتبر بود، دوباره امتحان کن.", reply_markup=faculty_kb("cls_"))
+                return
+            faculty = FACULTIES[idx]
             admin_class_filter.setdefault(uid, {})["faculty"] = faculty
             await cq.message.reply_text("📌 رشته‌ی مورد نظر رو انتخاب کن:", reply_markup=major_kb("cls_", faculty))
             return
@@ -751,7 +784,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if data.startswith("cls_maj|") and is_admin(uid):
-            major = data.split("|", 1)[1]
+            idx = int(data.split("|", 1)[1])
+            faculty = admin_class_filter.get(uid, {}).get("faculty")
+            if not faculty:
+                await cq.message.reply_text("اول دانشکده را انتخاب کن:", reply_markup=faculty_kb("cls_"))
+                return
+            majors = MAJORS_BY_FACULTY.get(faculty, [])
+            if idx < 0 or idx >= len(majors):
+                await cq.message.reply_text("انتخاب رشته نامعتبر بود، دوباره انتخاب کن.", reply_markup=major_kb("cls_", faculty))
+                return
+            major = majors[idx]
             admin_class_filter.setdefault(uid, {})["major"] = major
             await cq.message.reply_text("🗓 سال ورود رو انتخاب کن:", reply_markup=year_kb("cls_"))
             return
@@ -819,7 +861,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print("❌ ERROR IN buttons():", repr(e))
         traceback.print_exc()
-        # دیگه هیچ پیام خطایی برای کاربر نمی‌فرستیم
+        # دیگه پیام خطایی به کاربر نشون نمی‌دیم، فقط لاگ می‌کنیم
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
