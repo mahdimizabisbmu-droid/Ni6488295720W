@@ -1,5 +1,6 @@
 import os
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List
 
 import psycopg
 from psycopg.rows import dict_row
@@ -19,19 +20,36 @@ ARCHIVE_CHANNEL_ID = -1003387982513
 BOT_PUBLIC_LINK = "@SBMUchatBot"
 
 # =========================
-# Secrets via files
+# Read secrets from env OR files (robust)
 # =========================
-def read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read().strip()
+def read_first_existing(paths):
+    for p in paths:
+        try:
+            if p.exists() and p.is_file():
+                txt = p.read_text(encoding="utf-8").strip()
+                if txt:
+                    return txt
+        except Exception:
+            pass
+    return None
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or (read_text_file("Token.txt") if os.path.exists("Token.txt") else None)
-DATABASE_URL = os.environ.get("DATABASE_URL") or (read_text_file("Database.txt") if os.path.exists("Database.txt") else None)
+BASE_DIR = Path(__file__).resolve().parent          # .../src
+ROOT_DIR = BASE_DIR.parent                          # project root
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or read_first_existing([
+    ROOT_DIR / "Token.txt", BASE_DIR / "Token.txt",
+    ROOT_DIR / "token.txt", BASE_DIR / "token.txt",
+])
+
+DATABASE_URL = os.environ.get("DATABASE_URL") or read_first_existing([
+    ROOT_DIR / "Database.txt", BASE_DIR / "Database.txt",
+    ROOT_DIR / "database.txt", BASE_DIR / "database.txt",
+])
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN not found. Put token in Token.txt or env BOT_TOKEN")
+    raise ValueError("BOT_TOKEN not found. Put Token.txt near web.py/bot.py or set env BOT_TOKEN.")
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL not found. Put url in Database.txt or env DATABASE_URL")
+    raise ValueError("DATABASE_URL not found. Put Database.txt near web.py/bot.py or set env DATABASE_URL.")
 
 # =========================
 # DB connect + reconnect
@@ -42,6 +60,7 @@ def db_connect():
 db = db_connect()
 
 def q(sql: str, params: tuple = ()):
+    """Execute query with auto-reconnect on dropped connection."""
     global db
     try:
         with db.cursor() as cur:
@@ -96,6 +115,7 @@ def init_db():
     )
     """)
     q("CREATE INDEX IF NOT EXISTS idx_materials_search ON materials (faculty, major, course_name)")
+
     q("""
     CREATE TABLE IF NOT EXISTS user_stats (
         user_id BIGINT PRIMARY KEY,
@@ -103,6 +123,7 @@ def init_db():
         chat_used BOOLEAN NOT NULL DEFAULT FALSE
     )
     """)
+
     q("""
     CREATE TABLE IF NOT EXISTS chat_sessions (
         session_id BIGSERIAL PRIMARY KEY,
@@ -113,6 +134,7 @@ def init_db():
         status TEXT NOT NULL DEFAULT 'active'
     )
     """)
+
     q("""
     CREATE TABLE IF NOT EXISTS chat_messages (
         id BIGSERIAL PRIMARY KEY,
@@ -122,11 +144,11 @@ def init_db():
         ts TIMESTAMPTZ DEFAULT NOW()
     )
     """)
+
 init_db()
 
 # =========================
-# Faculties & majors by faculty (YES, separated)
-# you can expand/modify later
+# Faculties & majors
 # =========================
 FACULTIES = [
     "دانشکده پزشکی",
@@ -154,11 +176,10 @@ MAJORS_BY_FACULTY = {
     "دانشکده طب سنتی": ["طب سنتی ایرانی"],
 }
 
-# Entry years 1398..1410
 ENTRY_YEARS = [str(y) for y in range(1398, 1411)]
 
 # =========================
-# In-memory UI states
+# States (in-memory)
 # =========================
 user_state: Dict[int, str] = {}
 tmp: Dict[int, dict] = {}
@@ -166,11 +187,11 @@ search_state: Dict[int, bool] = {}
 
 # anonymous chat
 waiting_queue: List[int] = []
-active_chat: Dict[int, int] = {}
-active_session: Dict[int, int] = {}
+active_chat: Dict[int, int] = {}        # uid -> partner
+active_session: Dict[int, int] = {}     # uid -> session_id
 
-# admin filtering state
-admin_filter_state: Dict[int, Dict[str, str]] = {}  # uid -> {"step": "...", "faculty": "...", "major": "..."} etc.
+# admin class filter state
+admin_filter_state: Dict[int, Dict[str, str]] = {}
 
 # =========================
 # Texts
@@ -250,15 +271,17 @@ def user_configured(uid: int) -> bool:
 # =========================
 # Keyboards
 # =========================
+def start_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("➡️ شروع", callback_data="onboard")]])
+
 def main_menu() -> InlineKeyboardMarkup:
-    btns = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 جستجوی جزوه", callback_data="menu_search")],
         [InlineKeyboardButton("📤 ارسال جزوه (فقط PDF)", callback_data="menu_upload")],
         [InlineKeyboardButton("💬 شروع چت ناشناس", callback_data="menu_chat")],
         [InlineKeyboardButton("📣 معرفی به دوستان", callback_data="menu_invite")],
         [InlineKeyboardButton("👤 پروفایل من", callback_data="menu_profile")],
-    ]
-    return InlineKeyboardMarkup(btns)
+    ])
 
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -266,6 +289,7 @@ def admin_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 آمار کاربران", callback_data="admin_stats")],
         [InlineKeyboardButton("👥 ۱۵ کاربر جدید", callback_data="admin_latest")],
         [InlineKeyboardButton("🏫 لیست دانشجوها بر اساس کلاس", callback_data="admin_classlist")],
+        [InlineKeyboardButton("👤 رفتن به منوی کاربر", callback_data="go_user_menu")],
     ])
 
 def back_menu_kb() -> InlineKeyboardMarkup:
@@ -298,11 +322,13 @@ def search_kb() -> InlineKeyboardMarkup:
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_basic(update)
-    await update.message.reply_text(
-        WELCOME_TEXT,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➡️ شروع", callback_data="onboard")]])
-    )
+    uid = update.effective_user.id
+
+    if is_admin(uid):
+        await update.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
+        return
+
+    await update.message.reply_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=start_kb())
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_basic(update)
@@ -310,146 +336,41 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
 
-async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_user_basic(update)
-    uid = update.effective_user.id
-    if not user_configured(uid):
-        await update.message.reply_text("برای شروع، اول این چندتا انتخاب ساده رو انجام بده 👇", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➡️ شروع", callback_data="onboard")]
-        ]))
-        return
-    await update.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
-
 # =========================
-# Buttons
+# Buttons handler
 # =========================
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cq = update.callback_query
     await cq.answer()
     uid = cq.from_user.id
     save_user_basic(update)
-
     data = cq.data
 
-    # ---------------- Admin actions ----------------
-    if data == "admin_pending" and is_admin(uid):
-        row = q("SELECT * FROM pending_uploads WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
-        if not row:
-            await cq.message.reply_text("فعلاً چیزی برای تایید نداریم ✅", reply_markup=back_menu_kb())
-            return
-        await send_pending_to_admin(context, uid, row)
-        return
-
-    if data == "admin_stats" and is_admin(uid):
-        total = q("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
-        fac_rows = q("SELECT faculty, COUNT(*) AS c FROM users GROUP BY faculty ORDER BY c DESC").fetchall() or []
-        lines = [f"📊 آمار کاربران\n\n👥 کل کاربران: {total}\n"]
-        for r in fac_rows:
-            if r["faculty"]:
-                lines.append(f"• {r['faculty']}: {r['c']}")
-        await cq.message.reply_text("\n".join(lines), reply_markup=back_menu_kb())
-        return
-
-    if data == "admin_latest" and is_admin(uid):
-        rows = q("""
-            SELECT user_id, username, full_name, faculty, major, entry_year
-            FROM users
-            ORDER BY created_at DESC
-            LIMIT 15
-        """).fetchall() or []
-        if not rows:
-            await cq.message.reply_text("هنوز کسی نیومده 🙂", reply_markup=back_menu_kb())
-            return
-        out = ["👥 ۱۵ کاربر جدید:\n"]
-        for r in rows:
-            out.append(f"• {r['full_name'] or 'بدون‌نام'} | @{r['username'] or '-'} | {r['user_id']}")
-            out.append(f"  {r.get('faculty') or '-'} / {r.get('major') or '-'} / {r.get('entry_year') or '-'}\n")
-        await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
-        return
-
-    if data == "admin_classlist" and is_admin(uid):
-        # start filter wizard
-        admin_filter_state[uid] = {"step": "faculty"}
-        await cq.message.reply_text("🏫\nاول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
-        return
-
-    # classlist wizard steps
-    if data.startswith("cls_fac|") and is_admin(uid):
-        faculty = data.split("|", 1)[1]
-        admin_filter_state[uid] = {"step": "major", "faculty": faculty}
-        await cq.message.reply_text("حالا رشته رو انتخاب کن:", reply_markup=major_kb("cls_", faculty))
-        return
-
-    if data == "cls_back_fac" and is_admin(uid):
-        admin_filter_state[uid] = {"step": "faculty"}
-        await cq.message.reply_text("🏫\nاول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
-        return
-
-    if data.startswith("cls_maj|") and is_admin(uid):
-        major = data.split("|", 1)[1]
-        st = admin_filter_state.get(uid, {})
-        faculty = st.get("faculty")
-        admin_filter_state[uid] = {"step": "year", "faculty": faculty, "major": major}
-        await cq.message.reply_text("ورودی رو انتخاب کن:", reply_markup=year_kb("cls_"))
-        return
-
-    if data == "cls_back_maj" and is_admin(uid):
-        st = admin_filter_state.get(uid, {})
-        faculty = st.get("faculty")
-        if not faculty:
-            admin_filter_state[uid] = {"step": "faculty"}
-            await cq.message.reply_text("🏫\nاول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
-            return
-        admin_filter_state[uid] = {"step": "major", "faculty": faculty}
-        await cq.message.reply_text("حالا رشته رو انتخاب کن:", reply_markup=major_kb("cls_", faculty))
-        return
-
-    if data.startswith("cls_year|") and is_admin(uid):
-        year = data.split("|", 1)[1]
-        st = admin_filter_state.get(uid, {})
-        faculty = st.get("faculty")
-        major = st.get("major")
-        rows = q("""
-            SELECT user_id, username, full_name
-            FROM users
-            WHERE faculty=%s AND major=%s AND entry_year=%s
-            ORDER BY created_at DESC
-            LIMIT 200
-        """, (faculty, major, year)).fetchall() or []
-
-        header = f"👥 لیست دانشجوها\n\n🎓 {faculty}\n📌 {major}\n🗓 {year}\n\n"
-        if not rows:
-            await cq.message.reply_text(header + "فعلاً کسی تو این کلاس ثبت نشده 🙂", reply_markup=back_menu_kb())
-            return
-
-        out = [header]
-        for r in rows:
-            out.append(f"• {r['full_name'] or 'بدون‌نام'} | @{r['username'] or '-'} | {r['user_id']}")
-        out.append("\n(حداکثر ۲۰۰ نفر نمایش داده شد)")
-        await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
-        return
-
-    if data.startswith("appr|") and is_admin(uid):
-        upload_id = int(data.split("|")[1])
-        await approve_upload(context, uid, upload_id)
-        return
-
-    if data.startswith("rej|") and is_admin(uid):
-        upload_id = int(data.split("|")[1])
-        await reject_upload(context, uid, upload_id)
-        return
-
-    # ---------------- Navigation ----------------
-    if data == "back_menu":
+    # ---- Admin quick jump to user menu ----
+    if data == "go_user_menu":
         if not user_configured(uid):
-            await cq.message.reply_text("برای شروع فقط چندتا انتخاب ساده داریم 👇", reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➡️ شروع", callback_data="onboard")]
-            ]))
+            await cq.message.reply_text("برای شروع، اول دانشکده/رشته/ورودی رو انتخاب کن 👇", reply_markup=start_kb())
+        else:
+            await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
+        return
+
+    # ---- back menu ----
+    if data == "back_menu":
+        if is_admin(uid):
+            await cq.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
+            return
+        if not user_configured(uid):
+            await cq.message.reply_text("برای شروع فقط چندتا انتخاب ساده داریم 👇", reply_markup=start_kb())
             return
         await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
         return
 
-    # ---------------- Onboarding ----------------
+    # ---- invite ----
+    if data == "menu_invite":
+        await cq.message.reply_text(INVITE_TEXT, reply_markup=back_menu_kb())
+        return
+
+    # ---- onboarding ----
     if data == "onboard":
         await cq.message.reply_text("🎓\nاول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
         return
@@ -472,7 +393,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "usr_back_maj":
         row = q("SELECT faculty FROM users WHERE user_id=%s", (uid,)).fetchone()
-        faculty = row["faculty"] if row else None
+        faculty = row["faculty"] if row and row["faculty"] else None
         if not faculty:
             await cq.message.reply_text("🎓\nاول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
             return
@@ -485,7 +406,111 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("✅\nهمه‌چی آماده‌ست! خوش اومدی 💙\n\nاز اینجا شروع کن 👇", reply_markup=main_menu())
         return
 
-    # ---------------- Main menu actions ----------------
+    # ---- Admin: pending uploads ----
+    if data == "admin_pending" and is_admin(uid):
+        row = q("SELECT * FROM pending_uploads WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
+        if not row:
+            await cq.message.reply_text("فعلاً چیزی برای تایید نداریم ✅", reply_markup=back_menu_kb())
+            return
+        await send_pending_to_admin(context, uid, row)
+        return
+
+    # ---- Admin: stats ----
+    if data == "admin_stats" and is_admin(uid):
+        total = q("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        fac_rows = q("SELECT faculty, COUNT(*) AS c FROM users GROUP BY faculty ORDER BY c DESC").fetchall() or []
+        lines = [f"📊 آمار کاربران\n\n👥 کل کاربران: {total}\n"]
+        for r in fac_rows:
+            if r["faculty"]:
+                lines.append(f"• {r['faculty']}: {r['c']}")
+        await cq.message.reply_text("\n".join(lines), reply_markup=back_menu_kb())
+        return
+
+    # ---- Admin: latest users ----
+    if data == "admin_latest" and is_admin(uid):
+        rows = q("""
+            SELECT user_id, username, full_name, faculty, major, entry_year
+            FROM users
+            ORDER BY created_at DESC
+            LIMIT 15
+        """).fetchall() or []
+        if not rows:
+            await cq.message.reply_text("هنوز کسی نیومده 🙂", reply_markup=back_menu_kb())
+            return
+        out = ["👥 ۱۵ کاربر جدید:\n"]
+        for r in rows:
+            out.append(f"• {r['full_name'] or 'بدون‌نام'} | @{r['username'] or '-'} | {r['user_id']}")
+            out.append(f"  {r.get('faculty') or '-'} / {r.get('major') or '-'} / {r.get('entry_year') or '-'}\n")
+        await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
+        return
+
+    # ---- Admin: class list wizard ----
+    if data == "admin_classlist" and is_admin(uid):
+        admin_filter_state[uid] = {"step": "faculty"}
+        await cq.message.reply_text("🏫\nاول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
+        return
+
+    if data.startswith("cls_fac|") and is_admin(uid):
+        faculty = data.split("|", 1)[1]
+        admin_filter_state[uid] = {"step": "major", "faculty": faculty}
+        await cq.message.reply_text("حالا رشته رو انتخاب کن:", reply_markup=major_kb("cls_", faculty))
+        return
+
+    if data == "cls_back_fac" and is_admin(uid):
+        admin_filter_state[uid] = {"step": "faculty"}
+        await cq.message.reply_text("🏫\nاول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
+        return
+
+    if data.startswith("cls_maj|") and is_admin(uid):
+        major = data.split("|", 1)[1]
+        st = admin_filter_state.get(uid, {})
+        faculty = st.get("faculty")
+        admin_filter_state[uid] = {"step": "year", "faculty": faculty, "major": major}
+        await cq.message.reply_text("ورودی رو انتخاب کن:", reply_markup=year_kb("cls_"))
+        return
+
+    if data == "cls_back_maj" and is_admin(uid):
+        st = admin_filter_state.get(uid, {})
+        faculty = st.get("faculty")
+        admin_filter_state[uid] = {"step": "major", "faculty": faculty}
+        await cq.message.reply_text("حالا رشته رو انتخاب کن:", reply_markup=major_kb("cls_", faculty))
+        return
+
+    if data.startswith("cls_year|") and is_admin(uid):
+        year = data.split("|", 1)[1]
+        st = admin_filter_state.get(uid, {})
+        faculty = st.get("faculty")
+        major = st.get("major")
+        rows = q("""
+            SELECT user_id, username, full_name
+            FROM users
+            WHERE faculty=%s AND major=%s AND entry_year=%s
+            ORDER BY created_at DESC
+            LIMIT 200
+        """, (faculty, major, year)).fetchall() or []
+        header = f"👥 لیست دانشجوها\n\n🎓 {faculty}\n📌 {major}\n🗓 {year}\n\n"
+        if not rows:
+            await cq.message.reply_text(header + "فعلاً کسی تو این کلاس ثبت نشده 🙂", reply_markup=back_menu_kb())
+            return
+        out = [header]
+        for r in rows:
+            out.append(f"• {r['full_name'] or 'بدون‌نام'} | @{r['username'] or '-'} | {r['user_id']}")
+        out.append("\n(حداکثر ۲۰۰ نفر نمایش داده شد)")
+        await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
+        return
+
+    # ---- Approve/Reject buttons ----
+    if data.startswith("appr|") and is_admin(uid):
+        upload_id = int(data.split("|")[1])
+        await approve_upload(context, uid, upload_id)
+        return
+
+    if data.startswith("rej|") and is_admin(uid):
+        upload_id = int(data.split("|")[1])
+        await reject_upload(context, uid, upload_id)
+        return
+
+    # ---- User menus ----
     if data == "menu_profile":
         r = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone() or {}
         ap = approved_count(uid)
@@ -499,50 +524,37 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data == "menu_invite":
-        await cq.message.reply_text(INVITE_TEXT, reply_markup=back_menu_kb())
-        return
-
     if data == "menu_search":
         if not user_configured(uid):
-            await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➡️ شروع", callback_data="onboard")]
-            ]))
+            await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
             return
         search_state[uid] = True
-        await cq.message.reply_text(
-            "🔎 اسم درس رو بنویس (مثلاً: فیزیولوژی اعتصاب یا کینزیولوژی 2)",
-            reply_markup=search_kb()
-        )
+        await cq.message.reply_text("🔎 اسم درس رو بنویس (مثلاً: فیزیولوژی اعتصاب یا کینزیولوژی 2)", reply_markup=search_kb())
         return
 
     if data == "menu_upload":
         if not user_configured(uid):
-            await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➡️ شروع", callback_data="onboard")]
-            ]))
+            await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
             return
         user_state[uid] = "await_pdf"
-        await cq.message.reply_text(
-            "📤 یه فایل **PDF** از جزوه رو همینجا بفرست 💙",
-            parse_mode="Markdown",
-            reply_markup=back_menu_kb()
-        )
+        await cq.message.reply_text("📤 یه فایل **PDF** از جزوه رو همینجا بفرست 💙", parse_mode="Markdown", reply_markup=back_menu_kb())
         return
 
-    # ---------------- Chat ----------------
+    # ---- Anonymous chat ----
     if data == "menu_chat":
         if not user_configured(uid):
-            await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➡️ شروع", callback_data="onboard")]
-            ]))
+            await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
             return
+
         q("UPDATE user_stats SET chat_used=TRUE WHERE user_id=%s", (uid,))
+
         if uid in active_chat:
             await cq.message.reply_text("الان توی یه چتی 🙂", reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]
+                [InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")],
+                [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")]
             ]))
             return
+
         await cq.message.reply_text(
             CHAT_INTRO_TEXT,
             reply_markup=InlineKeyboardMarkup([
@@ -612,7 +624,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await end_chat(context, uid, ended_by=uid)
         return
 
-    # ---------------- Fetch material ----------------
+    # ---- Fetch a material ----
     if data.startswith("get|"):
         mid = int(data.split("|")[1])
         mat = q("SELECT * FROM materials WHERE material_id=%s", (mid,)).fetchone()
@@ -627,6 +639,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("اگه خواستی بازم سرچ کن یا جزوه بفرست 👇", reply_markup=search_kb())
         return
 
+    # fallback
+    if user_configured(uid):
+        await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
+    else:
+        await cq.message.reply_text("برای شروع فقط چندتا انتخاب ساده داریم 👇", reply_markup=start_kb())
+
 # =========================
 # Messages handler
 # =========================
@@ -635,7 +653,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     msg = update.message
 
-    # chat relay
+    # ---- chat relay (text only) ----
     if uid in active_chat:
         partner = active_chat[uid]
         sid = active_session.get(uid)
@@ -646,7 +664,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=partner, text="(فعلاً تو چت ناشناس فقط متن پشتیبانی می‌شه 🙂)")
         return
 
-    # search flow
+    # ---- search flow ----
     if search_state.get(uid):
         if not msg.text:
             return
@@ -678,17 +696,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         buttons.append([InlineKeyboardButton("📤 ارسال جزوه (فقط PDF)", callback_data="menu_upload")])
         buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")])
-
         await msg.reply_text("نتیجه‌ها 👇", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # upload flow
+    # ---- upload flow ----
     st = user_state.get(uid)
 
     if st == "await_pdf":
         if not msg.document:
             await msg.reply_text("فقط فایل **PDF** رو بفرست لطفاً 💙", parse_mode="Markdown", reply_markup=back_menu_kb())
             return
+
         filename = (msg.document.file_name or "").lower()
         if not filename.endswith(".pdf"):
             await msg.reply_text(
@@ -744,6 +762,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu()
         )
 
+        # notify admins
         for aid in ADMIN_IDS:
             try:
                 row = q("SELECT * FROM pending_uploads WHERE upload_id=%s", (upload_id,)).fetchone()
@@ -756,9 +775,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_configured(uid):
         await msg.reply_text("از منوی زیر انتخاب کن 👇", reply_markup=main_menu())
     else:
-        await msg.reply_text("برای شروع فقط چندتا انتخاب ساده داریم 👇", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➡️ شروع", callback_data="onboard")]
-        ]))
+        await msg.reply_text("برای شروع فقط چندتا انتخاب ساده داریم 👇", reply_markup=start_kb())
 
 # =========================
 # Admin approve/reject
@@ -768,7 +785,12 @@ async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_i
     ap = approved_count(row["submitter_id"])
     prof = row["professor_name"] or "-"
 
-    await context.bot.copy_message(chat_id=admin_chat_id, from_chat_id=row["user_chat_id"], message_id=row["user_message_id"])
+    # copy the PDF to admin
+    await context.bot.copy_message(
+        chat_id=admin_chat_id,
+        from_chat_id=row["user_chat_id"],
+        message_id=row["user_message_id"]
+    )
 
     await context.bot.send_message(
         chat_id=admin_chat_id,
@@ -895,13 +917,11 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(CommandHandler("menu", menu_cmd))
-
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_message))
     app.add_error_handler(on_error)
 
+    # IMPORTANT for Render (avoid signal handler in thread)
     app.run_polling(stop_signals=None)
