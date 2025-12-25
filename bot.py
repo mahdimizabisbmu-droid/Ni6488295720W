@@ -33,8 +33,8 @@ def read_first_existing(paths):
             pass
     return None
 
-BASE_DIR = Path(__file__).resolve().parent          # .../src
-ROOT_DIR = BASE_DIR.parent                          # project root
+BASE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = BASE_DIR.parent
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or read_first_existing([
     ROOT_DIR / "Token.txt", BASE_DIR / "Token.txt",
@@ -60,7 +60,6 @@ def db_connect():
 db = db_connect()
 
 def q(sql: str, params: tuple = ()):
-    """Execute query with auto-reconnect on dropped connection."""
     global db
     try:
         with db.cursor() as cur:
@@ -96,7 +95,7 @@ def init_db():
         professor_name TEXT,
         user_chat_id BIGINT NOT NULL,
         user_message_id BIGINT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
+        status TEXT NOT NULL DEFAULT 'pending',
         created_at TIMESTAMPTZ DEFAULT NOW()
     )
     """)
@@ -179,18 +178,16 @@ MAJORS_BY_FACULTY = {
 ENTRY_YEARS = [str(y) for y in range(1398, 1411)]
 
 # =========================
-# States (in-memory)
+# States
 # =========================
 user_state: Dict[int, str] = {}
 tmp: Dict[int, dict] = {}
 search_state: Dict[int, bool] = {}
 
-# anonymous chat
 waiting_queue: List[int] = []
-active_chat: Dict[int, int] = {}        # uid -> partner
-active_session: Dict[int, int] = {}     # uid -> session_id
+active_chat: Dict[int, int] = {}
+active_session: Dict[int, int] = {}
 
-# admin class filter state
 admin_filter_state: Dict[int, Dict[str, str]] = {}
 
 # =========================
@@ -346,7 +343,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_basic(update)
     data = cq.data
 
-    # ---- Admin quick jump to user menu ----
     if data == "go_user_menu":
         if not user_configured(uid):
             await cq.message.reply_text("برای شروع، اول دانشکده/رشته/ورودی رو انتخاب کن 👇", reply_markup=start_kb())
@@ -354,7 +350,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
         return
 
-    # ---- back menu ----
     if data == "back_menu":
         if is_admin(uid):
             await cq.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
@@ -365,12 +360,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
         return
 
-    # ---- invite ----
     if data == "menu_invite":
         await cq.message.reply_text(INVITE_TEXT, reply_markup=back_menu_kb())
         return
 
-    # ---- onboarding ----
     if data == "onboard":
         await cq.message.reply_text("🎓\nاول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
         return
@@ -406,7 +399,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("✅\nهمه‌چی آماده‌ست! خوش اومدی 💙\n\nاز اینجا شروع کن 👇", reply_markup=main_menu())
         return
 
-    # ---- Admin: pending uploads ----
     if data == "admin_pending" and is_admin(uid):
         row = q("SELECT * FROM pending_uploads WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
         if not row:
@@ -415,7 +407,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_pending_to_admin(context, uid, row)
         return
 
-    # ---- Admin: stats ----
     if data == "admin_stats" and is_admin(uid):
         total = q("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
         fac_rows = q("SELECT faculty, COUNT(*) AS c FROM users GROUP BY faculty ORDER BY c DESC").fetchall() or []
@@ -426,7 +417,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("\n".join(lines), reply_markup=back_menu_kb())
         return
 
-    # ---- Admin: latest users ----
     if data == "admin_latest" and is_admin(uid):
         rows = q("""
             SELECT user_id, username, full_name, faculty, major, entry_year
@@ -444,7 +434,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
         return
 
-    # ---- Admin: class list wizard ----
     if data == "admin_classlist" and is_admin(uid):
         admin_filter_state[uid] = {"step": "faculty"}
         await cq.message.reply_text("🏫\nاول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
@@ -499,27 +488,19 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
         return
 
-    # ---- Approve/Reject buttons ----
     if data.startswith("appr|") and is_admin(uid):
-        upload_id = int(data.split("|")[1])
-        await approve_upload(context, uid, upload_id)
+        await approve_upload(context, uid, int(data.split("|")[1]))
         return
 
     if data.startswith("rej|") and is_admin(uid):
-        upload_id = int(data.split("|")[1])
-        await reject_upload(context, uid, upload_id)
+        await reject_upload(context, uid, int(data.split("|")[1]))
         return
 
-    # ---- User menus ----
     if data == "menu_profile":
         r = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone() or {}
         ap = approved_count(uid)
         await cq.message.reply_text(
-            f"👤 پروفایل تو\n\n"
-            f"🎓 {r.get('faculty','-')}\n"
-            f"📌 {r.get('major','-')}\n"
-            f"🗓 {r.get('entry_year','-')}\n\n"
-            f"🏅 جزوه‌های تایید شده: {ap}",
+            f"👤 پروفایل تو\n\n🎓 {r.get('faculty','-')}\n📌 {r.get('major','-')}\n🗓 {r.get('entry_year','-')}\n\n🏅 جزوه‌های تایید شده: {ap}",
             reply_markup=back_menu_kb()
         )
         return
@@ -540,7 +521,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("📤 یه فایل **PDF** از جزوه رو همینجا بفرست 💙", parse_mode="Markdown", reply_markup=back_menu_kb())
         return
 
-    # ---- Anonymous chat ----
     if data == "menu_chat":
         if not user_configured(uid):
             await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
@@ -585,7 +565,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if partner is None:
             waiting_queue.append(uid)
             await cq.message.reply_text(
-                "⏳\nمنتظریم یه دانشجوی دیگه وصل بشه…\n\nهر وقت آماده شد، چت شروع می‌شه 🌱",
+                "⏳\nمنتظریم یه دانشجوی دیگه وصل بشه…",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("❌ لغو انتظار", callback_data="chat_cancel")],
                     [InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")]
@@ -601,12 +581,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id=uid,
-            text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(partner)}\nمی‌تونی چت کنی 🙂",
+            text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(partner)}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]])
         )
         await context.bot.send_message(
             chat_id=partner,
-            text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(uid)}\nمی‌تونی چت کنی 🙂",
+            text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(uid)}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]])
         )
         return
@@ -614,28 +594,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "chat_cancel":
         if uid in waiting_queue:
             waiting_queue.remove(uid)
-        await cq.message.reply_text(
-            "👌\nمنتظر موندن لغو شد\n\nهر وقت خواستی دوباره می‌تونی وارد چت ناشناس بشی 💬",
-            reply_markup=back_menu_kb()
-        )
+        await cq.message.reply_text("منتظر موندن لغو شد 👌", reply_markup=back_menu_kb())
         return
 
     if data == "chat_end":
         await end_chat(context, uid, ended_by=uid)
         return
 
-    # ---- Fetch a material ----
     if data.startswith("get|"):
         mid = int(data.split("|")[1])
         mat = q("SELECT * FROM materials WHERE material_id=%s", (mid,)).fetchone()
         if not mat:
             await cq.message.reply_text("این فایل موجود نیست یا حذف شده.", reply_markup=back_menu_kb())
             return
-        await context.bot.copy_message(
-            chat_id=uid,
-            from_chat_id=mat["archive_channel_id"],
-            message_id=mat["archive_message_id"]
-        )
+        await context.bot.copy_message(chat_id=uid, from_chat_id=mat["archive_channel_id"], message_id=mat["archive_message_id"])
         await cq.message.reply_text("اگه خواستی بازم سرچ کن یا جزوه بفرست 👇", reply_markup=search_kb())
         return
 
@@ -653,7 +625,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     msg = update.message
 
-    # ---- chat relay (text only) ----
+    # ---- chat relay ----
     if uid in active_chat:
         partner = active_chat[uid]
         sid = active_session.get(uid)
@@ -664,7 +636,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=partner, text="(فعلاً تو چت ناشناس فقط متن پشتیبانی می‌شه 🙂)")
         return
 
-    # ---- search flow ----
+    # ---- search ----
     if search_state.get(uid):
         if not msg.text:
             return
@@ -681,11 +653,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (user["faculty"], user["major"], f"%{query_text}%")).fetchall() or []
 
         if not rows:
-            await msg.reply_text(
-                "چیزی پیدا نشد 😕\n"
-                "اگه جزوه این درس رو داری، همینجا بفرست تا به بقیه هم کمک بشه 💙",
-                reply_markup=search_kb()
-            )
+            await msg.reply_text("چیزی پیدا نشد 😕", reply_markup=search_kb())
             return
 
         buttons = []
@@ -706,15 +674,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not msg.document:
             await msg.reply_text("فقط فایل **PDF** رو بفرست لطفاً 💙", parse_mode="Markdown", reply_markup=back_menu_kb())
             return
-
         filename = (msg.document.file_name or "").lower()
         if not filename.endswith(".pdf"):
-            await msg.reply_text(
-                "😊\nبرای اینکه جزوه‌ها مرتب و قابل استفاده باشن، فعلاً فقط فایل‌های **PDF** رو قبول می‌کنیم.\n"
-                "لطفاً نسخه PDF جزوه رو بفرست 💙",
-                parse_mode="Markdown",
-                reply_markup=back_menu_kb()
-            )
+            await msg.reply_text("فقط PDF قبول می‌کنیم 🙂", reply_markup=back_menu_kb())
             return
 
         u = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone()
@@ -755,14 +717,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_state.pop(uid, None)
         tmp.pop(uid, None)
 
-        await msg.reply_text(
-            "📩 جزوه‌ت رسید!\n"
-            "بعد از تایید ادمین توی جزوه‌یاب قرار می‌گیره 💙\n"
-            "ممنون که کمک می‌کنی 🌱",
-            reply_markup=main_menu()
-        )
+        await msg.reply_text("📩 جزوه‌ت رسید! بعد از تایید ادمین اضافه می‌شه 💙", reply_markup=main_menu())
 
-        # notify admins
         for aid in ADMIN_IDS:
             try:
                 row = q("SELECT * FROM pending_uploads WHERE upload_id=%s", (upload_id,)).fetchone()
@@ -782,25 +738,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, row: dict):
     user = q("SELECT user_id, username, full_name FROM users WHERE user_id=%s", (row["submitter_id"],)).fetchone()
-    ap = approved_count(row["submitter_id"])
     prof = row["professor_name"] or "-"
 
-    # copy the PDF to admin
-    await context.bot.copy_message(
-        chat_id=admin_chat_id,
-        from_chat_id=row["user_chat_id"],
-        message_id=row["user_message_id"]
-    )
+    await context.bot.copy_message(chat_id=admin_chat_id, from_chat_id=row["user_chat_id"], message_id=row["user_message_id"])
 
     await context.bot.send_message(
         chat_id=admin_chat_id,
         text=(
             "🗂 جزوه در انتظار تایید\n\n"
-            f"👤 فرستنده: {user.get('full_name') or 'بدون‌نام'} | @{user.get('username') or '-'} | {user['user_id']}\n"
+            f"👤 {user.get('full_name') or 'بدون‌نام'} | @{user.get('username') or '-'} | {user['user_id']}\n"
             f"🎓 {row['faculty']} / {row['major']} / {row['entry_year']}\n"
             f"📚 درس: {row['course_name']}\n"
             f"👨‍🏫 استاد: {prof}\n"
-            f"🏅 جزوه‌های تایید شده قبلی: {ap}\n"
         ),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ تایید", callback_data=f"appr|{row['upload_id']}"),
@@ -836,11 +785,7 @@ async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int,
 
     await context.bot.send_message(chat_id=admin_chat_id, text="✅ تایید شد و به آرشیو رفت.")
     try:
-        await context.bot.send_message(
-            chat_id=row["submitter_id"],
-            text="🎉 جزوه‌ت تایید شد!\nمرسی که به بچه‌ها کمک می‌کنی 💙\nحالا تو چت ناشناس کنار اسمت مدال 🏅 داری 😄",
-            reply_markup=main_menu()
-        )
+        await context.bot.send_message(chat_id=row["submitter_id"], text="🎉 جزوه‌ت تایید شد! مرسی 💙", reply_markup=main_menu())
     except Exception:
         pass
 
@@ -849,15 +794,10 @@ async def reject_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, 
     if not row:
         await context.bot.send_message(chat_id=admin_chat_id, text="این مورد قبلاً بررسی شده یا وجود ندارد.")
         return
-
     q("UPDATE pending_uploads SET status='rejected' WHERE upload_id=%s", (upload_id,))
     await context.bot.send_message(chat_id=admin_chat_id, text="❌ رد شد.")
     try:
-        await context.bot.send_message(
-            chat_id=row["submitter_id"],
-            text="🌱 جزوه‌ت فعلاً تایید نشد.\nاگه دوست داشتی یه نسخه مرتب‌تر/واضح‌تر دوباره بفرست 💙",
-            reply_markup=main_menu()
-        )
+        await context.bot.send_message(chat_id=row["submitter_id"], text="جزوه‌ت فعلاً تایید نشد 🌱", reply_markup=main_menu())
     except Exception:
         pass
 
@@ -908,20 +848,32 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
 # Error handler
 # =========================
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    err = context.error
-    if isinstance(err, NetworkError):
+    if isinstance(context.error, NetworkError):
         return
 
 # =========================
-# Run
+# Run (IMPORTANT FIX: delete webhook)
 # =========================
+async def _post_init(app):
+    # Fix "buttons not working" when webhook was set before
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
 def run_bot():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(_post_init)
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_message))
     app.add_error_handler(on_error)
 
-    # IMPORTANT for Render (avoid signal handler in thread)
-    app.run_polling(stop_signals=None)
+    app.run_polling(
+        stop_signals=None,
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
