@@ -245,6 +245,9 @@ active_session: Dict[int, int] = {}
 
 admin_broadcast_mode: Dict[int, bool] = {}
 admin_class_filter: Dict[int, Dict[str, str]] = {}
+admin_delete_mode: Dict[int, bool] = {}
+
+browse_context: Dict[int, Dict[str, int]] = {}
 
 
 # =========================
@@ -282,7 +285,7 @@ COURSE_NAME_TEXT = (
 INVITE_TEXT = (
     "بچه‌ها سلام 👋🌱\n"
     "یه ربات جزوه‌یاب برای علوم پزشکی شهید بهشتی راه افتاده که خیلی به کارمون میاد 😄\n\n"
-    "✅ سرچ جزوه با اسم درس\n"
+    "✅ سرچ جزوه با اسم درس (کل دانشگاه)\n"
     "✅ ارسال جزوه (فقط PDF) و بعد از تایید ادمین برای همه قابل استفاده می‌شه\n"
     "✅ چت ناشناس برای آشنایی با بچه‌های دانشگاه 😂\n\n"
     "اگه جزوه دارید، لطفاً بفرستید تا دست به دست هم ترم رو نجات بدیم 💙\n\n"
@@ -330,7 +333,7 @@ def user_configured(uid: int) -> bool:
 
 
 # =========================
-# Keyboards (با callback کوتاه)
+# Keyboards
 # =========================
 def start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("➡️ شروع", callback_data="onboard")]])
@@ -353,6 +356,7 @@ def admin_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 ۱۵ کاربر جدید", callback_data="admin_latest")],
         [InlineKeyboardButton("🏫 لیست دانشجوها بر اساس کلاس", callback_data="admin_classlist")],
         [InlineKeyboardButton("📢 پیام همگانی", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("🗑 حذف جزوه", callback_data="admin_delete")],
     ])
 
 
@@ -361,10 +365,6 @@ def back_menu_kb() -> InlineKeyboardMarkup:
 
 
 def faculty_kb(prefix: str) -> InlineKeyboardMarkup:
-    """
-    به جای اسم دانشکده، ایندکس می‌فرستیم:
-    usr_fac|0 , cls_fac|1 , ...
-    """
     rows = []
     for idx, f in enumerate(FACULTIES):
         rows.append([InlineKeyboardButton(f, callback_data=f"{prefix}fac|{idx}")])
@@ -373,10 +373,6 @@ def faculty_kb(prefix: str) -> InlineKeyboardMarkup:
 
 
 def major_kb(prefix: str, faculty: str) -> InlineKeyboardMarkup:
-    """
-    اینجا هم ایندکس رشته را می‌فرستیم:
-    usr_maj|0 , cls_maj|1 , ...
-    """
     majors = MAJORS_BY_FACULTY.get(faculty, [])
     rows = []
     for idx, m in enumerate(majors):
@@ -428,10 +424,25 @@ async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int,
         await context.bot.send_message(chat_id=admin_chat_id, text="این مورد قبلاً بررسی شده یا وجود ندارد.")
         return
 
+    submitter = _fetchone("SELECT username, full_name FROM users WHERE user_id=%s", (row["submitter_id"],))
+
+    caption_lines = [
+        f"📚 درس: {row['course_name']}",
+        f"👨‍🏫 استاد: {row['professor_name'] or '-'}",
+        f"🏫 دانشکده: {row['faculty']}",
+        f"📌 رشته: {row['major']} - ورودی {row['entry_year']}",
+    ]
+    if submitter:
+        caption_lines.append(
+            f"👤 ارسال‌کننده: {(submitter.get('full_name') or 'بدون‌نام')} | @{(submitter.get('username') or '-')}"
+        )
+    caption = "\n".join(caption_lines)
+
     copied: Message = await context.bot.copy_message(
         chat_id=ARCHIVE_CHANNEL_ID,
         from_chat_id=row["user_chat_id"],
-        message_id=row["user_message_id"]
+        message_id=row["user_message_id"],
+        caption=caption
     )
 
     _run("""
@@ -516,13 +527,12 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
 # =========================
 # Handlers
 # =========================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /start:
-      - ادمین → مستقیم پنل ادمین
-      - کاربری که قبلاً تنظیم شده → منوی اصلی
-      - کاربر جدید / بدون تنظیم → پیام خوش‌آمد + دکمه «شروع»
+    /start behavior:
+      - admin -> admin menu
+      - configured user -> main menu
+      - new / incomplete user -> welcome + onboard button
     """
     save_user_basic(update)
     uid = update.effective_user.id
@@ -638,8 +648,146 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not user_configured(uid):
                 await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
                 return
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔎 جستجو با اسم درس (کل دانشگاه)", callback_data="search_by_name")],
+                [InlineKeyboardButton("📚 مرور با دکمه‌ها (دانشکده / رشته / درس)", callback_data="search_browse")],
+                [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")],
+            ])
+            await cq.message.reply_text("چطور می‌خوای جزوه پیدا کنی؟", reply_markup=kb)
+            return
+
+        if data == "search_by_name":
             search_state[uid] = True
-            await cq.message.reply_text("🔎 اسم درس رو بنویس (مثلاً: فیزیولوژی اعتصاب یا کینزیولوژی 2)", reply_markup=search_kb())
+            await cq.message.reply_text(
+                "🔎 اسم درس رو بنویس (مثلاً: فیزیولوژی اعتصاب یا کینزیولوژی 2)\n"
+                "جستجو روی **کل جزوه‌های دانشگاه** انجام می‌شه.",
+                parse_mode="Markdown",
+                reply_markup=search_kb()
+            )
+            return
+
+        if data == "search_browse":
+            browse_context[uid] = {}
+            await cq.message.reply_text(
+                "📚 برای پیدا کردن جزوه با دکمه‌ها، اول دانشکده رو انتخاب کن:",
+                reply_markup=faculty_kb("ser_")
+            )
+            return
+
+        # --- browse by faculty/major/course ---
+        if data.startswith("ser_fac|"):
+            idx = int(data.split("|", 1)[1])
+            if idx < 0 or idx >= len(FACULTIES):
+                await cq.message.reply_text("انتخاب دانشکده نامعتبر بود، دوباره امتحان کن.", reply_markup=faculty_kb("ser_"))
+                return
+            faculty = FACULTIES[idx]
+            browse_context.setdefault(uid, {})["faculty_idx"] = idx
+            await cq.message.reply_text(
+                f"📌 حالا رشته‌ی مورد نظر در «{faculty}» رو انتخاب کن:",
+                reply_markup=major_kb("ser_", faculty)
+            )
+            return
+
+        if data == "ser_back_fac":
+            await cq.message.reply_text(
+                "📚 دوباره دانشکده رو انتخاب کن:",
+                reply_markup=faculty_kb("ser_")
+            )
+            return
+
+        if data.startswith("ser_maj|"):
+            idx = int(data.split("|", 1)[1])
+            ctx = browse_context.get(uid) or {}
+            f_idx = ctx.get("faculty_idx")
+            if f_idx is None or f_idx < 0 or f_idx >= len(FACULTIES):
+                await cq.message.reply_text("اول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("ser_"))
+                return
+            faculty = FACULTIES[f_idx]
+            majors = MAJORS_BY_FACULTY.get(faculty, [])
+            if idx < 0 or idx >= len(majors):
+                await cq.message.reply_text("انتخاب رشته نامعتبر بود، دوباره انتخاب کن.", reply_markup=major_kb("ser_", faculty))
+                return
+            major = majors[idx]
+            browse_context.setdefault(uid, {})["major_idx"] = idx
+
+            rows = _fetchall("""
+                SELECT MIN(material_id) AS material_id, course_name, professor_name
+                FROM materials
+                WHERE faculty=%s AND major=%s
+                GROUP BY course_name, professor_name
+                ORDER BY course_name
+            """, (faculty, major))
+
+            if not rows:
+                await cq.message.reply_text(
+                    "هنوز جزوه‌ای برای این رشته ثبت نشده 🙂",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📤 ارسال جزوه (فقط PDF)", callback_data="menu_upload")],
+                        [InlineKeyboardButton("🔙 انتخاب دوباره رشته", callback_data="ser_back_maj")],
+                        [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")],
+                    ])
+                )
+                return
+
+            buttons_list = []
+            for r in rows:
+                prof = (r.get("professor_name") or "").strip()
+                title = f"📚 {r['course_name']}"
+                if prof:
+                    title += f" — {prof}"
+                buttons_list.append([InlineKeyboardButton(title, callback_data=f"ser_course|{r['material_id']}")])
+
+            buttons_list.append([InlineKeyboardButton("🔙 برگشت به انتخاب رشته", callback_data="ser_back_maj")])
+            buttons_list.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")])
+
+            await cq.message.reply_text("درس مورد نظر رو انتخاب کن 👇", reply_markup=InlineKeyboardMarkup(buttons_list))
+            return
+
+        if data == "ser_back_maj":
+            ctx = browse_context.get(uid) or {}
+            f_idx = ctx.get("faculty_idx")
+            if f_idx is None or f_idx < 0 or f_idx >= len(FACULTIES):
+                await cq.message.reply_text("اول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("ser_"))
+                return
+            faculty = FACULTIES[f_idx]
+            await cq.message.reply_text(
+                f"📌 دوباره رشته‌ی مربوط به «{faculty}» رو انتخاب کن:",
+                reply_markup=major_kb("ser_", faculty)
+            )
+            return
+
+        if data.startswith("ser_course|"):
+            mid = int(data.split("|", 1)[1])
+            mat = _fetchone("SELECT faculty, major, course_name FROM materials WHERE material_id=%s", (mid,))
+            if not mat:
+                await cq.message.reply_text("این جزوه دیگر در سیستم وجود ندارد.", reply_markup=back_menu_kb())
+                return
+            rows = _fetchall(
+                "SELECT archive_channel_id, archive_message_id FROM materials "
+                "WHERE faculty=%s AND major=%s AND course_name=%s ORDER BY created_at DESC",
+                (mat["faculty"], mat["major"], mat["course_name"])
+            )
+            if not rows:
+                await cq.message.reply_text("چیزی برای این درس پیدا نشد.", reply_markup=back_menu_kb())
+                return
+
+            for r in rows:
+                try:
+                    await context.bot.copy_message(
+                        chat_id=uid,
+                        from_chat_id=r["archive_channel_id"],
+                        message_id=r["archive_message_id"]
+                    )
+                except Exception:
+                    pass
+
+            await cq.message.reply_text(
+                "هر وقت خواستی می‌تونی دوباره جزوه‌ی دیگه‌ای انتخاب کنی 👇",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📚 انتخاب جزوه‌ی دیگر", callback_data="search_browse")],
+                    [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")],
+                ])
+            )
             return
 
         if data == "menu_upload":
@@ -647,7 +795,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
                 return
             user_state[uid] = "await_pdf"
-            await cq.message.reply_text("📤 یه فایل **PDF** از جزوه رو همینجا بفرست 💙", parse_mode="Markdown", reply_markup=back_menu_kb())
+            await cq.message.reply_text(
+                "📤 یه فایل **PDF** از جزوه رو همینجا بفرست 💙",
+                parse_mode="Markdown",
+                reply_markup=back_menu_kb()
+            )
             return
 
         # --- chat ---
@@ -708,10 +860,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             active_session[uid] = sid
             active_session[partner] = sid
 
-            await context.bot.send_message(chat_id=uid, text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(partner)}",
-                                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]]))
-            await context.bot.send_message(chat_id=partner, text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(uid)}",
-                                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]]))
+            await context.bot.send_message(
+                chat_id=uid,
+                text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(partner)}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]])
+            )
+            await context.bot.send_message(
+                chat_id=partner,
+                text=f"🎉 وصل شدی!\n\n👤 ناشناس{badge(uid)}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")]])
+            )
             return
 
         if data == "chat_cancel":
@@ -773,7 +931,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data == "admin_broadcast" and is_admin(uid):
             admin_broadcast_mode[uid] = True
-            await cq.message.reply_text("✍️ پیام همگانی رو بفرست.\nهمون پیام (هر نوعی) بر اساس همونی که می‌فرستی برای همه کاربران کپی می‌شه.", reply_markup=back_menu_kb())
+            await cq.message.reply_text(
+                "✍️ پیام همگانی رو بفرست.\n"
+                "همون پیام (هر نوعی) بر اساس همونی که می‌فرستی برای همه کاربران کپی می‌شه.",
+                reply_markup=back_menu_kb()
+            )
+            return
+
+        if data == "admin_delete" and is_admin(uid):
+            admin_delete_mode[uid] = True
+            await cq.message.reply_text(
+                "🗑 آیدی عددی جزوه رو بفرست تا از دیتابیس حذف بشه.\n"
+                "برای دیدن آیدی، وقتی به عنوان ادمین جزوه‌ها رو جستجو می‌کنی، آیدی کنار هر مورد نمایش داده می‌شه.",
+                reply_markup=back_menu_kb()
+            )
             return
 
         # --- admin class list filter ---
@@ -854,14 +1025,18 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cq.message.reply_text(text, reply_markup=back_menu_kb())
             return
 
-        # --- get material ---
+        # --- get material (from search results) ---
         if data.startswith("get|"):
-            mid = int(data.split("|")[1])
+            mid = int(data.split("|", 1)[1])
             mat = _fetchone("SELECT * FROM materials WHERE material_id=%s", (mid,))
             if not mat:
                 await cq.message.reply_text("این فایل موجود نیست یا حذف شده.", reply_markup=back_menu_kb())
                 return
-            await context.bot.copy_message(chat_id=uid, from_chat_id=mat["archive_channel_id"], message_id=mat["archive_message_id"])
+            await context.bot.copy_message(
+                chat_id=uid,
+                from_chat_id=mat["archive_channel_id"],
+                message_id=mat["archive_message_id"]
+            )
             await cq.message.reply_text("اگه خواستی بازم سرچ کن یا جزوه بفرست 👇", reply_markup=search_kb())
             return
 
@@ -874,7 +1049,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print("❌ ERROR IN buttons():", repr(e))
         traceback.print_exc()
-        # دیگه پیام خطایی به کاربر نشون نمی‌دیم، فقط لاگ می‌کنیم
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -882,6 +1056,21 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_basic(update)
         uid = update.effective_user.id
         msg = update.message
+
+        # --- admin delete mode ---
+        if is_admin(uid) and admin_delete_mode.get(uid):
+            admin_delete_mode[uid] = False
+            if not msg.text or not msg.text.strip().isdigit():
+                await msg.reply_text("لطفاً فقط آیدی عددی جزوه رو بفرست 🙂", reply_markup=admin_menu())
+                return
+            mid = int(msg.text.strip())
+            mat = _fetchone("SELECT material_id FROM materials WHERE material_id=%s", (mid,))
+            if not mat:
+                await msg.reply_text("چنین جزوه‌ای پیدا نشد.", reply_markup=admin_menu())
+                return
+            _run("DELETE FROM materials WHERE material_id=%s", (mid,))
+            await msg.reply_text(f"✅ جزوه با آیدی {mid} از دیتابیس حذف شد.", reply_markup=admin_menu())
+            return
 
         # --- admin broadcast mode ---
         if uid in admin_broadcast_mode and is_admin(uid):
@@ -912,21 +1101,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=partner, text="(فعلاً تو چت ناشناس فقط متن پشتیبانی می‌شه 🙂)")
             return
 
-        # --- search mode ---
+        # --- search by name ---
         if search_state.get(uid):
             if not msg.text:
                 return
             search_state[uid] = False
             query_text = msg.text.strip()
 
-            user = _fetchone("SELECT faculty, major FROM users WHERE user_id=%s", (uid,))
             rows = _fetchall("""
-                SELECT material_id, course_name, professor_name
+                SELECT material_id, course_name, professor_name, faculty, major
                 FROM materials
-                WHERE faculty=%s AND major=%s AND course_name ILIKE %s
+                WHERE course_name ILIKE %s
                 ORDER BY created_at DESC
                 LIMIT 20
-            """, (user["faculty"], user["major"], f"%{query_text}%"))
+            """, (f"%{query_text}%",))
 
             if not rows:
                 await msg.reply_text("چیزی پیدا نشد 😕", reply_markup=search_kb())
@@ -935,7 +1123,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons_list = []
             for r in rows:
                 prof = (r.get("professor_name") or "").strip()
-                title = f"📄 {r['course_name']} — {prof}" if prof else f"📄 {r['course_name']}"
+                main_title = f"{r['course_name']}"
+                if prof:
+                    main_title += f" — {prof}"
+                main_title += f" ({r['faculty']} / {r['major']})"
+
+                prefix = f"#{r['material_id']} " if is_admin(uid) else ""
+                title = f"{prefix}📄 {main_title}"
                 buttons_list.append([InlineKeyboardButton(title, callback_data=f"get|{r['material_id']}")])
 
             buttons_list.append([InlineKeyboardButton("📤 ارسال جزوه (فقط PDF)", callback_data="menu_upload")])
@@ -1014,7 +1208,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print("❌ ERROR IN on_message():", repr(e))
         traceback.print_exc()
-        # به کاربر چیزی نمی‌گیم، فقط لاگ
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
