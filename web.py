@@ -11,17 +11,11 @@ def home():
 def run_flask():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
-def run_telegram():
-    # اجرای ربات در thread جدا
-    from bot import run_bot
-    run_bot()
-
 if __name__ == "__main__":
+    # Flask تو Thread اجرا میشه
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    bot_thread = threading.Thread(target=run_telegram, daemon=True)
-    bot_thread.start()
-
-    # زنده نگه داشتن پروسه اصلی
-    bot_thread.join()
+    # Bot باید تو Main Thread اجرا بشه (برای Python 3.13)
+    from bot import run_bot
+    run_bot()
