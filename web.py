@@ -1,25 +1,27 @@
 from flask import Flask
 import os
 import threading
-import nest_asyncio
-
-nest_asyncio.apply()
 
 app = Flask(__name__)
 
-@app.get("/")
+@app.route("/")
 def home():
-    return "Bot is running ✅"
+    return "Bot is running"
 
 def run_flask():
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
-if __name__ == "__main__":
-    # Keep a web port open for Render Web Service
-    t = threading.Thread(target=run_flask, daemon=True)
-    t.start()
-
-    # Bot must run in main thread
+def run_telegram():
+    # اجرای ربات در thread جدا
     from bot import run_bot
     run_bot()
+
+if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    bot_thread = threading.Thread(target=run_telegram, daemon=True)
+    bot_thread.start()
+
+    # زنده نگه داشتن پروسه اصلی
+    bot_thread.join()
