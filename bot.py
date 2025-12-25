@@ -516,12 +516,25 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
 # =========================
 # Handlers
 # =========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /start:
+      - ادمین → مستقیم پنل ادمین
+      - کاربری که قبلاً تنظیم شده → منوی اصلی
+      - کاربر جدید / بدون تنظیم → پیام خوش‌آمد + دکمه «شروع»
+    """
     save_user_basic(update)
     uid = update.effective_user.id
+
     if is_admin(uid):
         await update.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
         return
+
+    if user_configured(uid):
+        await update.message.reply_text("خوش برگشتی 👋", reply_markup=main_menu())
+        return
+
     await update.message.reply_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=start_kb())
 
 
