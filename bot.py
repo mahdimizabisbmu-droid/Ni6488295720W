@@ -1,7 +1,7 @@
 import os
 import traceback
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -57,7 +57,7 @@ if not DATABASE_URL:
 
 
 # =========================
-# DB connect + reconnect
+# DB connect + safe helpers
 # =========================
 def db_connect():
     return psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
@@ -66,21 +66,71 @@ def db_connect():
 db = db_connect()
 
 
-def q(sql: str, params: tuple = ()):
+def _run(sql: str, params: tuple = ()):
+    """Execute a statement (no fetch)."""
     global db
     try:
-        with db.cursor() as cur:
-            cur.execute(sql, params)
-            return cur
+        cur = db.cursor()
+        cur.execute(sql, params)
+        cur.close()
+        return
     except psycopg.OperationalError:
         db = db_connect()
-        with db.cursor() as cur:
-            cur.execute(sql, params)
-            return cur
+        cur = db.cursor()
+        cur.execute(sql, params)
+        cur.close()
+        return
+
+
+def _fetchone(sql: str, params: tuple = ()) -> Optional[dict]:
+    """Execute and fetchone safely."""
+    global db
+    try:
+        cur = db.cursor()
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        cur.close()
+        return row
+    except psycopg.OperationalError:
+        db = db_connect()
+        cur = db.cursor()
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        cur.close()
+        return row
+
+
+def _fetchall(sql: str, params: tuple = ()) -> List[dict]:
+    """Execute and fetchall safely."""
+    global db
+    try:
+        cur = db.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall() or []
+        cur.close()
+        return rows
+    except psycopg.OperationalError:
+        db = db_connect()
+        cur = db.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall() or []
+        cur.close()
+        return rows
+
+
+def _fetchval(sql: str, params: tuple = (), key: str = None) -> Any:
+    """Fetchone and return a value (first col or dict key)."""
+    row = _fetchone(sql, params)
+    if not row:
+        return None
+    if key is not None:
+        return row.get(key)
+    # dict_row preserves column order; take first value
+    return next(iter(row.values()))
 
 
 def init_db():
-    q("""
+    _run("""
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
         username TEXT,
@@ -92,7 +142,7 @@ def init_db():
         last_seen TIMESTAMPTZ DEFAULT NOW()
     )
     """)
-    q("""
+    _run("""
     CREATE TABLE IF NOT EXISTS pending_uploads (
         upload_id BIGSERIAL PRIMARY KEY,
         submitter_id BIGINT NOT NULL,
@@ -107,7 +157,7 @@ def init_db():
         created_at TIMESTAMPTZ DEFAULT NOW()
     )
     """)
-    q("""
+    _run("""
     CREATE TABLE IF NOT EXISTS materials (
         material_id BIGSERIAL PRIMARY KEY,
         faculty TEXT NOT NULL,
@@ -121,15 +171,15 @@ def init_db():
         created_at TIMESTAMPTZ DEFAULT NOW()
     )
     """)
-    q("CREATE INDEX IF NOT EXISTS idx_materials_search ON materials (faculty, major, course_name)")
-    q("""
+    _run("CREATE INDEX IF NOT EXISTS idx_materials_search ON materials (faculty, major, course_name)")
+    _run("""
     CREATE TABLE IF NOT EXISTS user_stats (
         user_id BIGINT PRIMARY KEY,
         approved_uploads INT NOT NULL DEFAULT 0,
         chat_used BOOLEAN NOT NULL DEFAULT FALSE
     )
     """)
-    q("""
+    _run("""
     CREATE TABLE IF NOT EXISTS chat_sessions (
         session_id BIGSERIAL PRIMARY KEY,
         user_a BIGINT NOT NULL,
@@ -139,7 +189,7 @@ def init_db():
         status TEXT NOT NULL DEFAULT 'active'
     )
     """)
-    q("""
+    _run("""
     CREATE TABLE IF NOT EXISTS chat_messages (
         id BIGSERIAL PRIMARY KEY,
         session_id BIGINT NOT NULL,
@@ -196,8 +246,6 @@ waiting_queue: List[int] = []
 active_chat: Dict[int, int] = {}
 active_session: Dict[int, int] = {}
 
-admin_filter_state: Dict[int, Dict[str, str]] = {}
-
 
 # =========================
 # Texts (friendly)
@@ -250,13 +298,13 @@ def is_admin(uid: int) -> bool:
 
 
 def ensure_stats(uid: int):
-    q("INSERT INTO user_stats (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (uid,))
+    _run("INSERT INTO user_stats (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (uid,))
 
 
 def approved_count(uid: int) -> int:
     ensure_stats(uid)
-    row = q("SELECT approved_uploads FROM user_stats WHERE user_id=%s", (uid,)).fetchone()
-    return int(row["approved_uploads"]) if row else 0
+    val = _fetchval("SELECT approved_uploads FROM user_stats WHERE user_id=%s", (uid,), key="approved_uploads")
+    return int(val or 0)
 
 
 def badge(uid: int) -> str:
@@ -265,7 +313,7 @@ def badge(uid: int) -> str:
 
 def save_user_basic(update: Update):
     u = update.effective_user
-    q("""
+    _run("""
     INSERT INTO users (user_id, username, full_name, last_seen)
     VALUES (%s,%s,%s,NOW())
     ON CONFLICT (user_id) DO UPDATE SET
@@ -277,8 +325,8 @@ def save_user_basic(update: Update):
 
 
 def user_configured(uid: int) -> bool:
-    row = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone()
-    return bool(row and row["faculty"] and row["major"] and row["entry_year"])
+    row = _fetchone("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,))
+    return bool(row and row.get("faculty") and row.get("major") and row.get("entry_year"))
 
 
 # =========================
@@ -303,7 +351,6 @@ def admin_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗂 جزوه‌های در انتظار تایید", callback_data="admin_pending")],
         [InlineKeyboardButton("📊 آمار کاربران", callback_data="admin_stats")],
         [InlineKeyboardButton("👥 ۱۵ کاربر جدید", callback_data="admin_latest")],
-        [InlineKeyboardButton("🏫 لیست دانشجوها بر اساس کلاس", callback_data="admin_classlist")],
         [InlineKeyboardButton("👤 رفتن به منوی کاربر", callback_data="go_user_menu")],
     ])
 
@@ -342,15 +389,15 @@ def search_kb() -> InlineKeyboardMarkup:
 # Admin helpers
 # =========================
 async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, row: dict):
-    user = q("SELECT user_id, username, full_name FROM users WHERE user_id=%s", (row["submitter_id"],)).fetchone()
-    prof = row["professor_name"] or "-"
+    user = _fetchone("SELECT user_id, username, full_name FROM users WHERE user_id=%s", (row["submitter_id"],))
+    prof = row.get("professor_name") or "-"
 
     await context.bot.copy_message(chat_id=admin_chat_id, from_chat_id=row["user_chat_id"], message_id=row["user_message_id"])
     await context.bot.send_message(
         chat_id=admin_chat_id,
         text=(
             "🗂 جزوه در انتظار تایید\n\n"
-            f"👤 {user.get('full_name') or 'بدون‌نام'} | @{user.get('username') or '-'} | {user['user_id']}\n"
+            f"👤 {(user.get('full_name') if user else 'بدون‌نام')} | @{(user.get('username') if user else '-') or '-'} | {row['submitter_id']}\n"
             f"🎓 {row['faculty']} / {row['major']} / {row['entry_year']}\n"
             f"📚 درس: {row['course_name']}\n"
             f"👨‍🏫 استاد: {prof}\n"
@@ -363,7 +410,7 @@ async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_i
 
 
 async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, upload_id: int):
-    row = q("SELECT * FROM pending_uploads WHERE upload_id=%s AND status='pending'", (upload_id,)).fetchone()
+    row = _fetchone("SELECT * FROM pending_uploads WHERE upload_id=%s AND status='pending'", (upload_id,))
     if not row:
         await context.bot.send_message(chat_id=admin_chat_id, text="این مورد قبلاً بررسی شده یا وجود ندارد.")
         return
@@ -374,15 +421,15 @@ async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int,
         message_id=row["user_message_id"]
     )
 
-    q("""
+    _run("""
         INSERT INTO materials (faculty, major, entry_year, course_name, professor_name,
                                archive_channel_id, archive_message_id, added_by)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
     """, (row["faculty"], row["major"], row["entry_year"], row["course_name"], row["professor_name"],
           ARCHIVE_CHANNEL_ID, copied.message_id, row["submitter_id"]))
 
-    q("UPDATE pending_uploads SET status='approved' WHERE upload_id=%s", (upload_id,))
-    q("""
+    _run("UPDATE pending_uploads SET status='approved' WHERE upload_id=%s", (upload_id,))
+    _run("""
         INSERT INTO user_stats (user_id, approved_uploads)
         VALUES (%s, 1)
         ON CONFLICT (user_id) DO UPDATE SET approved_uploads = user_stats.approved_uploads + 1
@@ -396,11 +443,11 @@ async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int,
 
 
 async def reject_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, upload_id: int):
-    row = q("SELECT * FROM pending_uploads WHERE upload_id=%s AND status='pending'", (upload_id,)).fetchone()
+    row = _fetchone("SELECT * FROM pending_uploads WHERE upload_id=%s AND status='pending'", (upload_id,))
     if not row:
         await context.bot.send_message(chat_id=admin_chat_id, text="این مورد قبلاً بررسی شده یا وجود ندارد.")
         return
-    q("UPDATE pending_uploads SET status='rejected' WHERE upload_id=%s", (upload_id,))
+    _run("UPDATE pending_uploads SET status='rejected' WHERE upload_id=%s", (upload_id,))
     await context.bot.send_message(chat_id=admin_chat_id, text="❌ رد شد.")
     try:
         await context.bot.send_message(chat_id=row["submitter_id"], text="جزوه‌ت فعلاً تایید نشد 🌱", reply_markup=main_menu())
@@ -426,7 +473,7 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
         active_session.pop(u, None)
 
     if sid:
-        q("UPDATE chat_sessions SET status='ended', ended_at=NOW() WHERE session_id=%s", (sid,))
+        _run("UPDATE chat_sessions SET status='ended', ended_at=NOW() WHERE session_id=%s", (sid,))
 
     try:
         await context.bot.send_message(
@@ -480,9 +527,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_basic(update)
         data = cq.data
 
-        # ✅ debug in logs
-        print("✅ BUTTON CLICK:", uid, "data=", data)
-
         if data == "back_menu":
             if is_admin(uid):
                 await cq.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
@@ -510,7 +554,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("usr_fac|"):
             faculty = data.split("|", 1)[1]
-            q("UPDATE users SET faculty=%s WHERE user_id=%s", (faculty, uid))
+            _run("UPDATE users SET faculty=%s WHERE user_id=%s", (faculty, uid))
             await cq.message.reply_text("📌 حالا رشته‌ت رو انتخاب کن:", reply_markup=major_kb("usr_", faculty))
             return
 
@@ -520,13 +564,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("usr_maj|"):
             major = data.split("|", 1)[1]
-            q("UPDATE users SET major=%s WHERE user_id=%s", (major, uid))
+            _run("UPDATE users SET major=%s WHERE user_id=%s", (major, uid))
             await cq.message.reply_text("🗓 ورودی‌ت رو انتخاب کن:", reply_markup=year_kb("usr_"))
             return
 
         if data == "usr_back_maj":
-            row = q("SELECT faculty FROM users WHERE user_id=%s", (uid,)).fetchone()
-            faculty = row["faculty"] if row and row["faculty"] else None
+            row = _fetchone("SELECT faculty FROM users WHERE user_id=%s", (uid,))
+            faculty = row["faculty"] if row and row.get("faculty") else None
             if not faculty:
                 await cq.message.reply_text("🎓 اول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
                 return
@@ -535,12 +579,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("usr_year|"):
             year = data.split("|", 1)[1]
-            q("UPDATE users SET entry_year=%s WHERE user_id=%s", (year, uid))
+            _run("UPDATE users SET entry_year=%s WHERE user_id=%s", (year, uid))
             await cq.message.reply_text("✅ آماده‌ای! خوش اومدی 💙\n\nاز اینجا شروع کن 👇", reply_markup=main_menu())
             return
 
         if data == "menu_profile":
-            r = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone() or {}
+            r = _fetchone("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)) or {}
             ap = approved_count(uid)
             await cq.message.reply_text(
                 f"👤 پروفایل تو\n\n🎓 {r.get('faculty','-')}\n📌 {r.get('major','-')}\n🗓 {r.get('entry_year','-')}\n\n🏅 جزوه‌های تایید شده: {ap}",
@@ -569,7 +613,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
                 return
 
-            q("UPDATE user_stats SET chat_used=TRUE WHERE user_id=%s", (uid,))
+            _run("UPDATE user_stats SET chat_used=TRUE WHERE user_id=%s", (uid,))
             if uid in active_chat:
                 await cq.message.reply_text("الان توی یه چتی 🙂", reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("❌ پایان چت", callback_data="chat_end")],
@@ -614,7 +658,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            sid = q("INSERT INTO chat_sessions (user_a, user_b) VALUES (%s,%s) RETURNING session_id", (uid, partner)).fetchone()["session_id"]
+            sid_row = _fetchone("INSERT INTO chat_sessions (user_a, user_b) VALUES (%s,%s) RETURNING session_id", (uid, partner))
+            sid = sid_row["session_id"]
             active_chat[uid] = partner
             active_chat[partner] = uid
             active_session[uid] = sid
@@ -637,7 +682,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if data == "admin_pending" and is_admin(uid):
-            row = q("SELECT * FROM pending_uploads WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
+            row = _fetchone("SELECT * FROM pending_uploads WHERE status='pending' ORDER BY created_at ASC LIMIT 1")
             if not row:
                 await cq.message.reply_text("فعلاً چیزی برای تایید نداریم ✅", reply_markup=back_menu_kb())
                 return
@@ -654,7 +699,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("get|"):
             mid = int(data.split("|")[1])
-            mat = q("SELECT * FROM materials WHERE material_id=%s", (mid,)).fetchone()
+            mat = _fetchone("SELECT * FROM materials WHERE material_id=%s", (mid,))
             if not mat:
                 await cq.message.reply_text("این فایل موجود نیست یا حذف شده.", reply_markup=back_menu_kb())
                 return
@@ -686,7 +731,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             partner = active_chat[uid]
             sid = active_session.get(uid)
             if msg.text:
-                q("INSERT INTO chat_messages (session_id, sender_id, msg_text) VALUES (%s,%s,%s)", (sid, uid, msg.text))
+                _run("INSERT INTO chat_messages (session_id, sender_id, msg_text) VALUES (%s,%s,%s)", (sid, uid, msg.text))
                 await context.bot.send_message(chat_id=partner, text=msg.text)
             else:
                 await context.bot.send_message(chat_id=partner, text="(فعلاً تو چت ناشناس فقط متن پشتیبانی می‌شه 🙂)")
@@ -698,14 +743,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             search_state[uid] = False
             query_text = msg.text.strip()
 
-            user = q("SELECT faculty, major FROM users WHERE user_id=%s", (uid,)).fetchone()
-            rows = q("""
+            user = _fetchone("SELECT faculty, major FROM users WHERE user_id=%s", (uid,))
+            rows = _fetchall("""
                 SELECT material_id, course_name, professor_name
                 FROM materials
                 WHERE faculty=%s AND major=%s AND course_name ILIKE %s
                 ORDER BY created_at DESC
                 LIMIT 20
-            """, (user["faculty"], user["major"], f"%{query_text}%")).fetchall() or []
+            """, (user["faculty"], user["major"], f"%{query_text}%"))
 
             if not rows:
                 await msg.reply_text("چیزی پیدا نشد 😕", reply_markup=search_kb())
@@ -713,7 +758,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             buttons_list = []
             for r in rows:
-                prof = (r["professor_name"] or "").strip()
+                prof = (r.get("professor_name") or "").strip()
                 title = f"📄 {r['course_name']} — {prof}" if prof else f"📄 {r['course_name']}"
                 buttons_list.append([InlineKeyboardButton(title, callback_data=f"get|{r['material_id']}")])
 
@@ -733,7 +778,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("فقط PDF قبول می‌کنیم 🙂", reply_markup=back_menu_kb())
                 return
 
-            u = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone()
+            u = _fetchone("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,))
             tmp[uid] = {
                 "user_chat_id": msg.chat_id,
                 "user_message_id": msg.message_id,
@@ -761,12 +806,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prof = None
 
             data = tmp[uid]
-            upload_id = q("""
+            row = _fetchone("""
                 INSERT INTO pending_uploads
                 (submitter_id, faculty, major, entry_year, course_name, professor_name, user_chat_id, user_message_id)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING upload_id
-            """, (uid, data["faculty"], data["major"], data["entry_year"], data["course_name"], prof, data["user_chat_id"], data["user_message_id"])).fetchone()["upload_id"]
+            """, (uid, data["faculty"], data["major"], data["entry_year"], data["course_name"], prof, data["user_chat_id"], data["user_message_id"]))
+            upload_id = row["upload_id"]
 
             user_state.pop(uid, None)
             tmp.pop(uid, None)
@@ -775,8 +821,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             for aid in ADMIN_IDS:
                 try:
-                    row = q("SELECT * FROM pending_uploads WHERE upload_id=%s", (upload_id,)).fetchone()
-                    await send_pending_to_admin(context, aid, row)
+                    pend = _fetchone("SELECT * FROM pending_uploads WHERE upload_id=%s", (upload_id,))
+                    await send_pending_to_admin(context, aid, pend)
                 except Exception:
                     pass
             return
@@ -796,7 +842,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # ✅ این باعث میشه هرچی خطا تو callback/message خورد، تو لاگ ببینی
     if isinstance(context.error, NetworkError):
         return
     print("❌ BOT ERROR:", repr(context.error))
@@ -804,7 +849,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# IMPORTANT: webhook mode entry
+# webhook mode entry
 # =========================
 def build_application():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
