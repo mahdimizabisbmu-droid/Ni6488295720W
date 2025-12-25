@@ -6,7 +6,6 @@ from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application
 
-# ========= CONFIG =========
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL") or "https://ni6488295720w.onrender.com"
 WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH") or "/tg-webhook"
 WEBHOOK_URL = PUBLIC_BASE_URL.rstrip("/") + WEBHOOK_PATH
@@ -29,11 +28,25 @@ def telegram_webhook():
         return "Bot not ready", 503
 
     data = request.get_json(force=True, silent=True) or {}
+
     try:
         update = Update.de_json(data, bot_app.bot)
-        asyncio.run_coroutine_threadsafe(bot_app.process_update(update), bot_loop)
+
+        # ✅ DEBUG: بفهمیم چی داره میاد
+        if update.callback_query:
+            print("📩 INCOMING: callback_query", "data=", update.callback_query.data)
+        elif update.message:
+            print("📩 INCOMING: message", "text=", getattr(update.message, "text", None))
+        else:
+            print("📩 INCOMING: other update type")
+
+        # ✅ مهم‌ترین تغییر: به جای process_update، بنداز داخل صف خود PTB
+        bot_loop.call_soon_threadsafe(bot_app.update_queue.put_nowait, update)
+
         return "ok", 200
+
     except Exception as e:
+        print("❌ WEBHOOK ERROR:", repr(e))
         return f"error: {e}", 500
 
 
@@ -50,18 +63,19 @@ def start_bot_background():
             await bot_app.initialize()
             await bot_app.start()
 
-            # ✅ پاک کردن وبهوک قبلی + ست کردن وبهوک جدید با همه آپدیت‌ها
             await bot_app.bot.delete_webhook(drop_pending_updates=True)
             ok = await bot_app.bot.set_webhook(
                 url=WEBHOOK_URL,
-                allowed_updates=Update.ALL_TYPES,   # ✅ خیلی مهم برای دکمه‌ها
+                allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True
             )
-
             wh = await bot_app.bot.get_webhook_info()
-            print("✅ Webhook URL:", WEBHOOK_URL)
-            print("✅ setWebhook result:", ok)
-            print("✅ Telegram webhook info:", wh.url, "allowed_updates=", wh.allowed_updates)
+
+            print("🌐 PUBLIC_BASE_URL =", PUBLIC_BASE_URL)
+            print("🌐 WEBHOOK_URL     =", WEBHOOK_URL)
+            print("✅ setWebhook:", ok)
+            print("✅ webhook info url:", wh.url)
+            print("✅ webhook allowed_updates:", wh.allowed_updates)
 
         bot_loop.run_until_complete(boot())
         bot_loop.run_forever()
@@ -71,9 +85,6 @@ def start_bot_background():
 
 
 if __name__ == "__main__":
-    print("🌐 PUBLIC_BASE_URL =", PUBLIC_BASE_URL)
-    print("🌐 WEBHOOK_URL     =", WEBHOOK_URL)
-
     t = threading.Thread(target=start_bot_background, daemon=True)
     t.start()
 
