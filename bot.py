@@ -61,7 +61,9 @@ if not DATABASE_URL:
 def db_connect():
     return psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
+
 db = db_connect()
+
 
 def q(sql: str, params: tuple = ()):
     global db
@@ -100,7 +102,7 @@ def init_db():
         professor_name TEXT,
         user_chat_id BIGINT NOT NULL,
         user_message_id BIGINT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
+        status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
         created_at TIMESTAMPTZ DEFAULT NOW()
     )
     """)
@@ -146,6 +148,7 @@ def init_db():
     )
     """)
 
+
 init_db()
 
 
@@ -182,7 +185,7 @@ ENTRY_YEARS = [str(y) for y in range(1398, 1411)]
 
 
 # =========================
-# States (in-memory)
+# In-memory states
 # =========================
 user_state: Dict[int, str] = {}
 tmp: Dict[int, dict] = {}
@@ -244,16 +247,20 @@ INVITE_TEXT = (
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
+
 def ensure_stats(uid: int):
     q("INSERT INTO user_stats (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (uid,))
+
 
 def approved_count(uid: int) -> int:
     ensure_stats(uid)
     row = q("SELECT approved_uploads FROM user_stats WHERE user_id=%s", (uid,)).fetchone()
     return int(row["approved_uploads"]) if row else 0
 
+
 def badge(uid: int) -> str:
     return " 🏅جزوه‌یار" if approved_count(uid) >= 1 else ""
+
 
 def save_user_basic(update: Update):
     u = update.effective_user
@@ -267,6 +274,7 @@ def save_user_basic(update: Update):
     """, (u.id, u.username, (u.full_name or "").strip()))
     ensure_stats(u.id)
 
+
 def user_configured(uid: int) -> bool:
     row = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone()
     return bool(row and row["faculty"] and row["major"] and row["entry_year"])
@@ -278,6 +286,7 @@ def user_configured(uid: int) -> bool:
 def start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("➡️ شروع", callback_data="onboard")]])
 
+
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 جستجوی جزوه", callback_data="menu_search")],
@@ -286,6 +295,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📣 معرفی به دوستان", callback_data="menu_invite")],
         [InlineKeyboardButton("👤 پروفایل من", callback_data="menu_profile")],
     ])
+
 
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -296,13 +306,16 @@ def admin_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👤 رفتن به منوی کاربر", callback_data="go_user_menu")],
     ])
 
+
 def back_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")]])
+
 
 def faculty_kb(prefix: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(f, callback_data=f"{prefix}fac|{f}")] for f in FACULTIES]
     rows.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")])
     return InlineKeyboardMarkup(rows)
+
 
 def major_kb(prefix: str, faculty: str) -> InlineKeyboardMarkup:
     majors = MAJORS_BY_FACULTY.get(faculty, [])
@@ -310,10 +323,12 @@ def major_kb(prefix: str, faculty: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("🔙 برگشت", callback_data=f"{prefix}back_fac")])
     return InlineKeyboardMarkup(rows)
 
+
 def year_kb(prefix: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(y, callback_data=f"{prefix}year|{y}")] for y in ENTRY_YEARS]
     rows.append([InlineKeyboardButton("🔙 برگشت", callback_data=f"{prefix}back_maj")])
     return InlineKeyboardMarkup(rows)
+
 
 def search_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -323,18 +338,13 @@ def search_kb() -> InlineKeyboardMarkup:
 
 
 # =========================
-# Admin: pending card
+# Admin: pending card + approve/reject
 # =========================
 async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, row: dict):
     user = q("SELECT user_id, username, full_name FROM users WHERE user_id=%s", (row["submitter_id"],)).fetchone()
     prof = row["professor_name"] or "-"
 
-    await context.bot.copy_message(
-        chat_id=admin_chat_id,
-        from_chat_id=row["user_chat_id"],
-        message_id=row["user_message_id"]
-    )
-
+    await context.bot.copy_message(chat_id=admin_chat_id, from_chat_id=row["user_chat_id"], message_id=row["user_message_id"])
     await context.bot.send_message(
         chat_id=admin_chat_id,
         text=(
@@ -468,6 +478,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_basic(update)
     data = cq.data
 
+    # --- back menu ---
     if data == "back_menu":
         if is_admin(uid):
             await cq.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
@@ -489,6 +500,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text(INVITE_TEXT, reply_markup=back_menu_kb())
         return
 
+    # --- onboarding ---
     if data == "onboard":
         await cq.message.reply_text("🎓 اول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
         return
@@ -524,6 +536,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("✅ آماده‌ای! خوش اومدی 💙\n\nاز اینجا شروع کن 👇", reply_markup=main_menu())
         return
 
+    # --- user menu ---
     if data == "menu_profile":
         r = q("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)).fetchone() or {}
         ap = approved_count(uid)
@@ -549,7 +562,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cq.message.reply_text("📤 یه فایل **PDF** از جزوه رو همینجا بفرست 💙", parse_mode="Markdown", reply_markup=back_menu_kb())
         return
 
-    # ---------- Chat ----------
+    # --- chat ---
     if data == "menu_chat":
         if not user_configured(uid):
             await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
@@ -622,7 +635,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await end_chat(context, uid, ended_by=uid)
         return
 
-    # ---------- Admin ----------
+    # --- admin ---
     if data == "admin_pending" and is_admin(uid):
         row = q("SELECT * FROM pending_uploads WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
         if not row:
@@ -639,88 +652,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reject_upload(context, uid, int(data.split("|")[1]))
         return
 
-    if data == "admin_stats" and is_admin(uid):
-        total = q("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
-        fac_rows = q("SELECT faculty, COUNT(*) AS c FROM users GROUP BY faculty ORDER BY c DESC").fetchall() or []
-        lines = [f"📊 آمار کاربران\n\n👥 کل کاربران: {total}\n"]
-        for r in fac_rows:
-            if r["faculty"]:
-                lines.append(f"• {r['faculty']}: {r['c']}")
-        await cq.message.reply_text("\n".join(lines), reply_markup=back_menu_kb())
-        return
-
-    if data == "admin_latest" and is_admin(uid):
-        rows = q("""
-            SELECT user_id, username, full_name, faculty, major, entry_year
-            FROM users
-            ORDER BY created_at DESC
-            LIMIT 15
-        """).fetchall() or []
-        if not rows:
-            await cq.message.reply_text("هنوز کسی نیومده 🙂", reply_markup=back_menu_kb())
-            return
-        out = ["👥 ۱۵ کاربر جدید:\n"]
-        for r in rows:
-            out.append(f"• {r['full_name'] or 'بدون‌نام'} | @{r['username'] or '-'} | {r['user_id']}")
-            out.append(f"  {r.get('faculty') or '-'} / {r.get('major') or '-'} / {r.get('entry_year') or '-'}\n")
-        await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
-        return
-
-    if data == "admin_classlist" and is_admin(uid):
-        admin_filter_state[uid] = {"step": "faculty"}
-        await cq.message.reply_text("🏫 اول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
-        return
-
-    if data.startswith("cls_fac|") and is_admin(uid):
-        faculty = data.split("|", 1)[1]
-        admin_filter_state[uid] = {"step": "major", "faculty": faculty}
-        await cq.message.reply_text("حالا رشته رو انتخاب کن:", reply_markup=major_kb("cls_", faculty))
-        return
-
-    if data == "cls_back_fac" and is_admin(uid):
-        admin_filter_state[uid] = {"step": "faculty"}
-        await cq.message.reply_text("🏫 اول دانشکده رو انتخاب کن:", reply_markup=faculty_kb("cls_"))
-        return
-
-    if data.startswith("cls_maj|") and is_admin(uid):
-        major = data.split("|", 1)[1]
-        st = admin_filter_state.get(uid, {})
-        faculty = st.get("faculty")
-        admin_filter_state[uid] = {"step": "year", "faculty": faculty, "major": major}
-        await cq.message.reply_text("ورودی رو انتخاب کن:", reply_markup=year_kb("cls_"))
-        return
-
-    if data == "cls_back_maj" and is_admin(uid):
-        st = admin_filter_state.get(uid, {})
-        faculty = st.get("faculty")
-        admin_filter_state[uid] = {"step": "major", "faculty": faculty}
-        await cq.message.reply_text("حالا رشته رو انتخاب کن:", reply_markup=major_kb("cls_", faculty))
-        return
-
-    if data.startswith("cls_year|") and is_admin(uid):
-        year = data.split("|", 1)[1]
-        st = admin_filter_state.get(uid, {})
-        faculty = st.get("faculty")
-        major = st.get("major")
-        rows = q("""
-            SELECT user_id, username, full_name
-            FROM users
-            WHERE faculty=%s AND major=%s AND entry_year=%s
-            ORDER BY created_at DESC
-            LIMIT 200
-        """, (faculty, major, year)).fetchall() or []
-        header = f"👥 لیست دانشجوها\n\n🎓 {faculty}\n📌 {major}\n🗓 {year}\n\n"
-        if not rows:
-            await cq.message.reply_text(header + "فعلاً کسی تو این کلاس ثبت نشده 🙂", reply_markup=back_menu_kb())
-            return
-        out = [header]
-        for r in rows:
-            out.append(f"• {r['full_name'] or 'بدون‌نام'} | @{r['username'] or '-'} | {r['user_id']}")
-        out.append("\n(حداکثر ۲۰۰ نفر نمایش داده شد)")
-        await cq.message.reply_text("\n".join(out), reply_markup=back_menu_kb())
-        return
-
-    # ---------- Get material ----------
     if data.startswith("get|"):
         mid = int(data.split("|")[1])
         mat = q("SELECT * FROM materials WHERE material_id=%s", (mid,)).fetchone()
@@ -774,15 +705,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("چیزی پیدا نشد 😕", reply_markup=search_kb())
             return
 
-        buttons = []
+        buttons_list = []
         for r in rows:
             prof = (r["professor_name"] or "").strip()
             title = f"📄 {r['course_name']} — {prof}" if prof else f"📄 {r['course_name']}"
-            buttons.append([InlineKeyboardButton(title, callback_data=f"get|{r['material_id']}")])
+            buttons_list.append([InlineKeyboardButton(title, callback_data=f"get|{r['material_id']}")])
 
-        buttons.append([InlineKeyboardButton("📤 ارسال جزوه (فقط PDF)", callback_data="menu_upload")])
-        buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")])
-        await msg.reply_text("نتیجه‌ها 👇", reply_markup=InlineKeyboardMarkup(buttons))
+        buttons_list.append([InlineKeyboardButton("📤 ارسال جزوه (فقط PDF)", callback_data="menu_upload")])
+        buttons_list.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")])
+        await msg.reply_text("نتیجه‌ها 👇", reply_markup=InlineKeyboardMarkup(buttons_list))
         return
 
     # upload flow
@@ -837,6 +768,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await msg.reply_text("📩 جزوه‌ت رسید! بعد از تایید ادمین اضافه می‌شه 💙", reply_markup=main_menu())
 
+        # notify admin(s)
         for aid in ADMIN_IDS:
             try:
                 row = q("SELECT * FROM pending_uploads WHERE upload_id=%s", (upload_id,)).fetchone()
@@ -858,14 +790,10 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Build application for webhook mode
+# IMPORTANT: webhook mode entry
 # =========================
 def build_application():
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
