@@ -21,6 +21,9 @@ ADMIN_IDS = {6474515118}
 ARCHIVE_CHANNEL_ID = -1003387982513
 BOT_PUBLIC_LINK = "@SBMUchatBot"
 
+# 👇 آیدی عددی گروه (جدید)
+GROUP_ID = -1003614589024
+
 
 # =========================
 # Read secrets from env OR files
@@ -191,7 +194,6 @@ def init_db():
         ts TIMESTAMPTZ DEFAULT NOW()
     )
     """)
-    # پیام همگانی دانشجوها
     _run("""
     CREATE TABLE IF NOT EXISTS user_broadcasts (
         id BIGSERIAL PRIMARY KEY,
@@ -360,7 +362,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔎 جستجوی جزوه / نمونه‌سوال", callback_data="menu_search")],
         [InlineKeyboardButton("📤 ارسال جزوه / نمونه‌سوال (فقط PDF)", callback_data="menu_upload")],
         [InlineKeyboardButton("📣 پیام همگانی (بعد از ثبت جزوه)", callback_data="menu_user_bc")],
-        [InlineKeyboardButton("💬 چت ناشناس با دانشجوی رندوم", callback_data="menu_chat")],
+        [InlineKeyboardButton("💬 چت با فرد رندوم تو دانشگاه", callback_data="menu_chat")],
         [InlineKeyboardButton("📣 معرفی به دوستان", callback_data="menu_invite")],
         [InlineKeyboardButton("👤 پروفایل من", callback_data="menu_profile")],
     ])
@@ -420,7 +422,11 @@ async def send_pending_to_admin(context: ContextTypes.DEFAULT_TYPE, admin_chat_i
     user = _fetchone("SELECT user_id, username, full_name FROM users WHERE user_id=%s", (row["submitter_id"],))
     prof = row.get("professor_name") or "-"
 
-    await context.bot.copy_message(chat_id=admin_chat_id, from_chat_id=row["user_chat_id"], message_id=row["user_message_id"])
+    await context.bot.copy_message(
+        chat_id=admin_chat_id,
+        from_chat_id=row["user_chat_id"],
+        message_id=row["user_message_id"]
+    )
     await context.bot.send_message(
         chat_id=admin_chat_id,
         text=(
@@ -480,7 +486,11 @@ async def approve_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int,
 
     await context.bot.send_message(chat_id=admin_chat_id, text="✅ فایل تایید شد و به آرشیو رفت.")
     try:
-        await context.bot.send_message(chat_id=row["submitter_id"], text="🎉 جزوه / نمونه‌سوال‌ت تایید شد! مرسی 💙", reply_markup=main_menu())
+        await context.bot.send_message(
+            chat_id=row["submitter_id"],
+            text="🎉 جزوه / نمونه‌سوال‌ت تایید شد! مرسی 💙",
+            reply_markup=main_menu()
+        )
     except Exception:
         pass
 
@@ -493,7 +503,11 @@ async def reject_upload(context: ContextTypes.DEFAULT_TYPE, admin_chat_id: int, 
     _run("UPDATE pending_uploads SET status='rejected' WHERE upload_id=%s", (upload_id,))
     await context.bot.send_message(chat_id=admin_chat_id, text="❌ رد شد.")
     try:
-        await context.bot.send_message(chat_id=row["submitter_id"], text="فایل‌ت فعلاً تایید نشد 🌱", reply_markup=main_menu())
+        await context.bot.send_message(
+            chat_id=row["submitter_id"],
+            text="فایل‌ت فعلاً تایید نشد 🌱",
+            reply_markup=main_menu()
+        )
     except Exception:
         pass
 
@@ -523,7 +537,7 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
             chat_id=ended_by,
             text="👋 چت رو تموم کردی.\nاگه دوست داشتی دوباره چت جدید شروع کن 😄",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 چت ناشناس جدید", callback_data="menu_chat")],
+                [InlineKeyboardButton("💬 چت ناشناس جدید", callback_data="chat_end")],
                 [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")]
             ])
         )
@@ -547,6 +561,11 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
 # Handlers
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if update.message.chat.type != "private":
+        return
+
     save_user_basic(update)
     uid = update.effective_user.id
 
@@ -562,10 +581,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.message.chat.type != "private":
+        return
     save_user_basic(update)
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
+
+
+# خوش‌آمدگویی در گروه (با تگ کاربر)
+async def group_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return
+
+    chat = msg.chat
+    if chat.type not in ("group", "supergroup"):
+        return
+    if chat.id != GROUP_ID:
+        return
+
+    if not msg.new_chat_members:
+        return
+
+    for member in msg.new_chat_members:
+        if member.is_bot:
+            continue
+        text = (
+            f"{member.mention_html()} خوش اومدی 🌱\n\n"
+            "این گروه توسط خود دانشجوها اداره می‌شه و هیچ ارتباط رسمی با دانشگاه نداره، پس راحت باش 😊\n\n"
+            f"برای پیدا کردن جزوه / نمونه‌سوال و استفاده از امکانات بیشتر، از ربات استفاده کن: {BOT_PUBLIC_LINK}\n\n"
+            "<b>نکته مهم:</b>\n"
+            "• برای ارسال استیکر در گروه، باید حداقل یک جزوه / نمونه‌سوال تو ربات ثبت و تایید کرده باشی.\n"
+            "• برای ارسال گیف، باید حداقل دو جزوه / نمونه‌سوال تایید شده داشته باشی."
+        )
+        try:
+            await chat.send_message(text=text, parse_mode="HTML")
+        except Exception:
+            pass
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -573,12 +626,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cq = update.callback_query
         await cq.answer()
         uid = cq.from_user.id
+        chat = cq.message.chat
+
+        if chat.type != "private":
+            return
+
         save_user_basic(update)
         data = cq.data
 
-        print("BUTTON CLICK:", uid, data)
-
-        # --- back menu ---
         if data == "back_menu":
             if is_admin(uid):
                 await cq.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
@@ -589,12 +644,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
             return
 
-        # --- invite ---
         if data == "menu_invite":
             await cq.message.reply_text(INVITE_TEXT, reply_markup=back_menu_kb())
             return
 
-        # --- onboarding ---
         if data == "onboard":
             await cq.message.reply_text("🎓 اول دانشکده‌ت رو انتخاب کن:", reply_markup=faculty_kb("usr_"))
             return
@@ -647,7 +700,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cq.message.reply_text("✅ آماده‌ای! خوش اومدی 💙\n\nاز اینجا شروع کن 👇", reply_markup=main_menu())
             return
 
-        # --- user menu ---
         if data == "menu_profile":
             r = _fetchone("SELECT faculty, major, entry_year FROM users WHERE user_id=%s", (uid,)) or {}
             ap = approved_count(uid)
@@ -688,7 +740,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # --- browse by faculty/major/course ---
         if data.startswith("ser_fac|"):
             idx = int(data.split("|", 1)[1])
             if idx < 0 or idx >= len(FACULTIES):
@@ -816,7 +867,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # --- user broadcast (student) ---
         if data == "menu_user_bc":
             if not user_configured(uid):
                 await cq.message.reply_text("اول مشخصات دانشکده‌ات رو کامل کن 🙂", reply_markup=start_kb())
@@ -836,7 +886,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # --- chat ---
         if data == "menu_chat":
             if not user_configured(uid):
                 await cq.message.reply_text("اول دانشکده، رشته و ورودی رو انتخاب کن 🙂", reply_markup=start_kb())
@@ -916,7 +965,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await end_chat(context, uid, ended_by=uid)
             return
 
-        # --- admin buttons ---
         if data == "admin_pending" and is_admin(uid):
             row = _fetchone("SELECT * FROM pending_uploads WHERE status='pending' ORDER BY created_at ASC LIMIT 1")
             if not row:
@@ -1035,7 +1083,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cq.message.reply_text("پایان لیست ۱۰ چت اخیر 👆", reply_markup=back_menu_kb())
             return
 
-        # --- approve / reject user broadcasts ---
         if data.startswith("ubappr|") and is_admin(uid):
             bid = int(data.split("|", 1)[1])
             row = _fetchone("SELECT * FROM user_broadcasts WHERE id=%s AND status='pending'", (bid,))
@@ -1092,7 +1139,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             return
 
-        # --- admin class list filter ---
         if data.startswith("cls_fac|") and is_admin(uid):
             idx = int(data.split("|", 1)[1])
             if idx < 0 or idx >= len(FACULTIES):
@@ -1165,7 +1211,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cq.message.reply_text(text, reply_markup=back_menu_kb())
             return
 
-        # --- get material (from search results) ---
         if data.startswith("get|"):
             mid = int(data.split("|", 1)[1])
             mat = _fetchone("SELECT * FROM materials WHERE material_id=%s", (mid,))
@@ -1180,7 +1225,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cq.message.reply_text("اگه خواستی بازم سرچ کن یا فایل جدید بفرست 👇", reply_markup=search_kb())
             return
 
-        # fallback
         if user_configured(uid):
             await cq.message.reply_text("منوی اصلی 👇", reply_markup=main_menu())
         else:
@@ -1193,11 +1237,82 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        save_user_basic(update)
-        uid = update.effective_user.id
         msg = update.message
+        if not msg:
+            return
 
-        # --- admin delete mode ---
+        chat = msg.chat
+        user = msg.from_user
+        uid = user.id
+
+        save_user_basic(update)
+
+        # ========================
+        # رفتار مخصوص گروه
+        # ========================
+        if chat.type in ("group", "supergroup"):
+            if chat.id != GROUP_ID:
+                return
+            if user.is_bot:
+                return
+
+            # استیکر
+            if msg.sticker:
+                if approved_count(uid) < 1:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                    try:
+                        await chat.send_message(
+                            text=(
+                                f"{user.mention_html()} 🙂\n\n"
+                                "برای ارسال <b>استیکر</b> تو این گروه، باید حداقل یک جزوه / نمونه‌سوال تو ربات ثبت و تایید کرده باشی 💙\n"
+                                f"برای شروع از ربات استفاده کن: {BOT_PUBLIC_LINK}"
+                            ),
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+                return
+
+            # گیف
+            is_gif = False
+            if msg.animation:
+                is_gif = True
+            elif msg.document and (
+                (msg.document.mime_type and msg.document.mime_type == "image/gif")
+                or ((msg.document.file_name or "").lower().endswith(".gif"))
+            ):
+                is_gif = True
+
+            if is_gif:
+                if approved_count(uid) < 2:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                    try:
+                        await chat.send_message(
+                            text=(
+                                f"{user.mention_html()} 🙂\n\n"
+                                "برای ارسال <b>گیف</b> تو این گروه، باید حداقل دو جزوه / نمونه‌سوال تو ربات ثبت و تایید کرده باشی 💙\n"
+                                f"برای شروع از ربات استفاده کن: {BOT_PUBLIC_LINK}"
+                            ),
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+                return
+
+            return
+
+        # ========================
+        # از اینجا به بعد فقط چت خصوصی
+        # ========================
+        if chat.type != "private":
+            return
+
         if is_admin(uid) and admin_delete_mode.get(uid):
             admin_delete_mode[uid] = False
             if not msg.text or not msg.text.strip().isdigit():
@@ -1212,7 +1327,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"✅ فایل با آیدی {mid} از دیتابیس حذف شد.", reply_markup=admin_menu())
             return
 
-        # --- admin broadcast mode ---
         if uid in admin_broadcast_mode and is_admin(uid):
             admin_broadcast_mode.pop(uid, None)
             users = _fetchall("SELECT user_id FROM users")
@@ -1230,7 +1344,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"✅ پیام همگانی برای حدود {sent} کاربر ارسال شد.", reply_markup=admin_menu())
             return
 
-        # --- user broadcast mode (student) ---
         if user_broadcast_mode.get(uid):
             user_broadcast_mode[uid] = False
             if approved_count(uid) < 1:
@@ -1255,7 +1368,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=main_menu()
             )
 
-            # ارسال برای ادمین‌ها جهت تایید
             for aid in ADMIN_IDS:
                 try:
                     await context.bot.copy_message(
@@ -1274,14 +1386,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         ),
                         reply_markup=InlineKeyboardMarkup([
                             [InlineKeyboardButton("✅ تایید پیام دانشجو", callback_data=f"ubappr|{bid}")],
-                             [InlineKeyboardButton("❌ رد پیام", callback_data=f"ubrej|{bid}")]
+                            [InlineKeyboardButton("❌ رد پیام", callback_data=f"ubrej|{bid}")]
                         ])
                     )
                 except Exception:
                     pass
             return
 
-        # --- anonymous chat ---
         if uid in active_chat:
             partner = active_chat[uid]
             sid = active_session.get(uid)
@@ -1292,7 +1403,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=partner, text="(فعلاً تو چت ناشناس فقط متن پشتیبانی می‌شه 🙂)")
             return
 
-        # --- search by name (user or admin) ---
         if search_state.get(uid):
             if not msg.text:
                 return
@@ -1328,7 +1438,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("نتیجه‌ها 👇", reply_markup=InlineKeyboardMarkup(buttons_list))
             return
 
-        # --- upload flow ---
         st = user_state.get(uid)
 
         if st == "await_pdf":
@@ -1381,7 +1490,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await msg.reply_text("📩 فایل‌ت رسید! بعد از تایید ادمین برای بقیه قابل استفاده می‌شه 💙", reply_markup=main_menu())
 
-            # notify admins
             for aid in ADMIN_IDS:
                 try:
                     pend = _fetchone("SELECT * FROM pending_uploads WHERE upload_id=%s", (upload_id,))
@@ -1390,7 +1498,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             return
 
-        # fallback
         if user_configured(uid):
             await msg.reply_text("از منوی زیر انتخاب کن 👇", reply_markup=main_menu())
         else:
@@ -1413,6 +1520,10 @@ def build_application():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
+
+    # خوش‌آمدگویی در گروه
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_welcome))
+
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_message))
     app.add_error_handler(on_error)
