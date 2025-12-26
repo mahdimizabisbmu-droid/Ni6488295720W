@@ -1,4 +1,5 @@
 import os
+import asyncio
 import traceback
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -351,23 +352,12 @@ def format_user_row(row: Optional[dict]) -> str:
 
 
 # =========================
-# Auto delete helpers
+# Auto delete helper (با asyncio)
 # =========================
-async def delete_message_job(ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id, message_id = ctx.job.data
+async def delete_after(bot, chat_id: int, message_id: int, delay: int = 7):
+    await asyncio.sleep(delay)
     try:
-        await ctx.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
-
-
-def schedule_autodelete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay_sec: int = 7):
-    try:
-        context.job_queue.run_once(
-            delete_message_job,
-            when=delay_sec,
-            data=(chat_id, message_id)
-        )
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
 
@@ -639,7 +629,7 @@ async def group_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         try:
             sent = await chat.send_message(text=text, parse_mode="HTML")
-            schedule_autodelete(context, chat.id, sent.message_id, delay_sec=7)
+            asyncio.create_task(delete_after(context.bot, chat.id, sent.message_id, delay=7))
         except Exception:
             pass
 
@@ -1023,7 +1013,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "FROM users ORDER BY created_at DESC LIMIT 15"
             )
             if not rows:
-                await cq.message.reply_text("فعلاً کاربری پیدا نشد.", reply_markup=back_menu_kk())
+                await cq.message.reply_text("فعلاً کاربری پیدا نشد.", reply_markup=back_menu_kb())
                 return
             lines = []
             for i, r in enumerate(rows, start=1):
@@ -1295,7 +1285,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ),
                             parse_mode="HTML"
                         )
-                        schedule_autodelete(context, chat.id, warn.message_id, delay_sec=7)
+                        asyncio.create_task(delete_after(context.bot, chat.id, warn.message_id, delay=7))
                     except Exception:
                         pass
                 return
@@ -1325,7 +1315,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ),
                             parse_mode="HTML"
                         )
-                        schedule_autodelete(context, chat.id, warn.message_id, delay_sec=7)
+                        asyncio.create_task(delete_after(context.bot, chat.id, warn.message_id, delay=7))
                     except Exception:
                         pass
                 return
