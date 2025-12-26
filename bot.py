@@ -21,7 +21,7 @@ ADMIN_IDS = {6474515118}
 ARCHIVE_CHANNEL_ID = -1003387982513
 BOT_PUBLIC_LINK = "@SBMUchatBot"
 
-# 👇 آیدی عددی گروه (جدید)
+# آیدی عددی گروه
 GROUP_ID = -1003614589024
 
 
@@ -351,6 +351,28 @@ def format_user_row(row: Optional[dict]) -> str:
 
 
 # =========================
+# Auto delete helpers
+# =========================
+async def delete_message_job(ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id, message_id = ctx.job.data
+    try:
+        await ctx.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+def schedule_autodelete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay_sec: int = 7):
+    try:
+        context.job_queue.run_once(
+            delete_message_job,
+            when=delay_sec,
+            data=(chat_id, message_id)
+        )
+    except Exception:
+        pass
+
+
+# =========================
 # Keyboards
 # =========================
 def start_kb() -> InlineKeyboardMarkup:
@@ -537,7 +559,7 @@ async def end_chat(context: ContextTypes.DEFAULT_TYPE, uid: int, ended_by: int):
             chat_id=ended_by,
             text="👋 چت رو تموم کردی.\nاگه دوست داشتی دوباره چت جدید شروع کن 😄",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 چت ناشناس جدید", callback_data="chat_end")],
+                [InlineKeyboardButton("💬 چت ناشناس جدید", callback_data="menu_chat")],
                 [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_menu")]
             ])
         )
@@ -589,7 +611,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛠 پنل ادمین", reply_markup=admin_menu())
 
 
-# خوش‌آمدگویی در گروه (با تگ کاربر)
+# خوش‌آمدگویی در گروه (با تگ و حذف بعد ۷ ثانیه)
 async def group_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
@@ -616,7 +638,8 @@ async def group_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• برای ارسال گیف، باید حداقل دو جزوه / نمونه‌سوال تایید شده داشته باشی."
         )
         try:
-            await chat.send_message(text=text, parse_mode="HTML")
+            sent = await chat.send_message(text=text, parse_mode="HTML")
+            schedule_autodelete(context, chat.id, sent.message_id, delay_sec=7)
         except Exception:
             pass
 
@@ -1000,7 +1023,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "FROM users ORDER BY created_at DESC LIMIT 15"
             )
             if not rows:
-                await cq.message.reply_text("فعلاً کاربری پیدا نشد.", reply_markup=back_menu_kb())
+                await cq.message.reply_text("فعلاً کاربری پیدا نشد.", reply_markup=back_menu_kk())
                 return
             lines = []
             for i, r in enumerate(rows, start=1):
@@ -1264,7 +1287,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
                     try:
-                        await chat.send_message(
+                        warn = await chat.send_message(
                             text=(
                                 f"{user.mention_html()} 🙂\n\n"
                                 "برای ارسال <b>استیکر</b> تو این گروه، باید حداقل یک جزوه / نمونه‌سوال تو ربات ثبت و تایید کرده باشی 💙\n"
@@ -1272,6 +1295,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ),
                             parse_mode="HTML"
                         )
+                        schedule_autodelete(context, chat.id, warn.message_id, delay_sec=7)
                     except Exception:
                         pass
                 return
@@ -1293,7 +1317,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
                     try:
-                        await chat.send_message(
+                        warn = await chat.send_message(
                             text=(
                                 f"{user.mention_html()} 🙂\n\n"
                                 "برای ارسال <b>گیف</b> تو این گروه، باید حداقل دو جزوه / نمونه‌سوال تو ربات ثبت و تایید کرده باشی 💙\n"
@@ -1301,6 +1325,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ),
                             parse_mode="HTML"
                         )
+                        schedule_autodelete(context, chat.id, warn.message_id, delay_sec=7)
                     except Exception:
                         pass
                 return
