@@ -8,3 +8,5 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: PUBLIC_BASE_URL
+        value: https://ni6488295720w-31ma.onrender.com
