@@ -6,7 +6,7 @@ from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application
 
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL") or "https://ni6488295720w.onrender.com"
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL") or ""https://ni6488295720w-31ma.onrender.com
 WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH") or "/tg-webhook"
 WEBHOOK_URL = PUBLIC_BASE_URL.rstrip("/") + WEBHOOK_PATH
 
